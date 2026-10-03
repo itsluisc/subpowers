@@ -65,12 +65,19 @@ tmo() {
 chk_antigravity() {
   local a o; a="$(command -v agy 2>/dev/null || echo "$HOME/.local/bin/agy")"
   [[ -x "$a" ]] || return 1
-  o="$(cd "${TMPDIR:-/tmp}" && tmo "$a" models 2>&1)" || true
+  local rc=0
+  o="$(cd "${TMPDIR:-/tmp}" && tmo "$a" models 2>&1)" || rc=$?
+  # A probe that timed out (124 = timeout, 142 = perl alarm) says the machine is busy, NOT that the
+  # plan is logged out. Reading it as OFF cached a false "not connected" for 10 minutes and skipped
+  # the fastest painter (2026-10-02, load average 80 to 130). Assume connected; the real call tells the truth.
+  if [[ $rc -eq 124 || $rc -eq 142 ]]; then return 0; fi
   grep -q '^gemini-' <<<"$o"
 }
 chk_grok() {
   local o; command -v grok >/dev/null 2>&1 || return 1
-  o="$(cd "${TMPDIR:-/tmp}" && tmo grok models 2>&1)" || true
+  local rc=0
+  o="$(cd "${TMPDIR:-/tmp}" && tmo grok models 2>&1)" || rc=$?
+  if [[ $rc -eq 124 || $rc -eq 142 ]]; then return 0; fi   # timed out = busy machine, not logged out
   grep -qi 'logged in with grok.com' <<<"$o"
 }
 has_antigravity() { login_cached antigravity chk_antigravity; }
@@ -165,6 +172,28 @@ sheet.save(out, quality=86); print(out)
 PY
 }
 
+# Big reference photos make every painter slow: a 4096 px phone photo kept Nano Banana busy for
+# minutes (400 s with three references, against 24 s with none). Painters work from about 1280 px
+# anyway, so each reference is shrunk once and cached by file and mtime.
+small_ref() {
+  local f="$1" key out
+  [[ -f "$f" ]] || { echo "$f"; return; }
+  mkdir -p "$CACHE_DIR/refs-small"
+  key="$(printf '%s|%s' "$f" "$(stat -f '%m-%z' "$f" 2>/dev/null || stat -c '%Y-%s' "$f")" | shasum | cut -c1-16)"
+  out="$CACHE_DIR/refs-small/$key.jpg"
+  if [[ ! -s "$out" ]]; then
+    python3 - "$f" "$out" <<'PY' 2>/dev/null || true
+import sys
+from PIL import Image, ImageOps
+im = ImageOps.exif_transpose(Image.open(sys.argv[1])).convert("RGB")
+if max(im.size) > 1280:
+    im.thumbnail((1280, 1280))
+im.save(sys.argv[2], "JPEG", quality=88)
+PY
+  fi
+  if [[ -s "$out" ]]; then echo "$out"; else echo "$f"; fi
+}
+
 cmd="${1:-help}"; [[ $# -gt 0 ]] && shift
 case "$cmd" in
   image|draw)
@@ -177,8 +206,11 @@ case "$cmd" in
         --refs)
           [[ $# -ge 2 ]] || usage
           rf="$(ref_files "$2")" || exit 3
-          while IFS= read -r f; do [[ -n "$f" ]] && args+=(--ref "$f"); done <<< "$rf"
+          while IFS= read -r f; do [[ -n "$f" ]] && args+=(--ref "$(small_ref "$f")"); done <<< "$rf"
           shift 2 ;;
+        --ref)
+          [[ $# -ge 2 ]] || usage
+          args+=(--ref "$(small_ref "$2")"); shift 2 ;;
         *) args+=("$1"); shift ;;
       esac
     done
