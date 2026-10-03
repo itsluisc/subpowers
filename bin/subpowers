@@ -12,13 +12,14 @@
 #   subpowers think "<question>" [--json-schema FILE]    a text answer on the same subscriptions (plans frames, slides)
 #   subpowers video "<prompt>" out.mp4 [--first IMG] [--refs NAME] [--duration 1-15] [--aspect 16:9]  a short Grok video with sound
 #   subpowers library find [WORDS] [--painter P] [--tag k=v]  every image you made, with its tags
-#   subpowers doctor [--fix] [--smoke]  |  powers  |  update
+#   subpowers doctor [--fix] [--smoke]  |  powers  |  update  |  --version
 #   subpowers canary [--live] [--json] [--notify]  drift radar (vendor CLIs changing); --install-launchagent
 #
 # Painters (each runs on YOUR login, never an API key):
 #   chatgpt      OpenAI's current image model through the codex CLI (ChatGPT plan). 60-100 s.
-#   antigravity  Google's Nano Banana 2 through the Antigravity CLI (Google AI plan). ~20-40 s.
-#   grok         xAI's Grok Imagine through the Grok CLI (SuperGrok plan). ~35-45 s.
+#   google       Google's Nano Banana 2 through the Antigravity CLI (Google AI plan). 20-120 s.
+#                ("antigravity" is the same painter; both names work.)
+#   grok         xAI's Grok Imagine through the Grok CLI (SuperGrok plan). 45-100 s.
 # --painter auto (default): the first connected painter; if it fails (paused plan, quota), the next.
 # --painter council (or all): every connected painter paints the same prompt in parallel, plus a side-by-side
 #   sheet, so you pick the best one. SUBPOWERS_PAINTER sets the default.
@@ -32,10 +33,12 @@ done
 here="$(cd "$(dirname "$src")" && pwd)"
 HOME_DIR="${SUBPOWERS_HOME:-$HOME/.subpowers}"
 ORDER="chatgpt antigravity grok"
+VERSION="0.3.2"
 
 # The help is the header comment, read up to its first non-comment line so it cannot drift.
 usage() { awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$here/subpowers" >&2; exit "${1:-2}"; }
 say() { echo "subpowers: $*" >&2; }
+need() { [[ $1 -ge 2 ]] || { say "$2 needs a value"; exit 2; }; }   # need "$#" --flag
 
 has_chatgpt() {
   local o; command -v codex >/dev/null 2>&1 || return 1
@@ -233,7 +236,7 @@ case "$cmd" in
         contact_sheet "${stem}-all.jpg" "${items[@]}" >/dev/null
         if [[ -f "${stem}-all.jpg" ]]; then echo "${stem}-all.jpg"; fi
         ;;
-      *) say "unknown painter '$painter' (chatgpt, antigravity, grok, all)"; exit 2 ;;
+      *) say "unknown painter '$painter' (chatgpt, google, grok, council)"; exit 2 ;;
     esac
     ;;
   sheet)
@@ -253,11 +256,11 @@ Photorealistic, evenly spaced, no text, no labels, no watermark."
     painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; style=""; size="1536x1024"; refargs=()
     while [[ $# -gt 0 ]]; do
       case "$1" in
-        --painter) painter="$(norm_painter "$2")"; shift 2 ;;
-        --style) style="$2"; shift 2 ;;
-        --size) size="$2"; shift 2 ;;
-        --refs) refargs+=(--refs "$2"); shift 2 ;;
-        --ref) refargs+=(--ref "$2"); shift 2 ;;
+        --painter) need "$#" --painter; painter="$(norm_painter "$2")"; shift 2 ;;
+        --style) need "$#" --style; style="$2"; shift 2 ;;
+        --size) need "$#" --size; size="$2"; shift 2 ;;
+        --refs) need "$#" --refs; refargs+=(--refs "$2"); shift 2 ;;
+        --ref) need "$#" --ref; refargs+=(--ref "$2"); shift 2 ;;
         *) say "unknown storyboard option: $1"; exit 2 ;;
       esac
     done
@@ -508,6 +511,9 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     if [[ -d "$root/.git" ]]; then git -C "$root" -c core.fileMode=false pull --ff-only && bash "$root/install.sh" --no-doctor
     else say "not a git install; re-run the installer from a fresh download"; exit 1; fi
     ;;
+  version|-v|--version)
+    v="$(git -C "$here/.." rev-parse --short HEAD 2>/dev/null || true)"
+    echo "subpowers $VERSION${v:+ ($v)}" ;;
   help|-h|--help) usage 0 ;;
   *) say "unknown command '$cmd'"; usage ;;
 esac

@@ -77,6 +77,16 @@ elif "-p" in cmd:
     aspect = m.group(1) if m else "1:1"
     refs = re.findall(r'"(/[^"]+)"', task.split("\n", 1)[0]) if task.startswith("There are") else []
     cid = str(uuid.uuid4())
+    if os.environ.get("STUB_AGY_IMAGE_QUOTA"):  # the helper runs, the image tool is out of quota (real 2026-09-26)
+        err = ('failed to generate content: 429 Too Many Requests, body: {"error": {"code": 429, "message": '
+               '"You have exhausted your capacity on this model. Your quota will reset after 3h57m27s.", '
+               '"status": "RESOURCE_EXHAUSTED"}}')
+        print(json.dumps({"init": {"conversation_id": cid}}))
+        print(json.dumps({"step_update": {"conversation_id": cid, "tool_name": "generate_image", "state": "ERROR",
+                                          "error": {"type": "TOOL_ERROR", "message": err}}}))
+        print(json.dumps({"result": {"conversation_id": cid, "status": "SUCCESS",
+                                     "response": "The image generation request failed because the quota is exhausted."}}))
+        sys.exit(0)
     brain = os.path.join(profile, "antigravity-cli", "brain", cid)
     os.makedirs(os.path.join(brain, ".system_generated", "logs"), exist_ok=True)
     w, h = _stub.DIMS[aspect]

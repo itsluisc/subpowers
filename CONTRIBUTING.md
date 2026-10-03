@@ -23,8 +23,8 @@ subpowers doctor --smoke
 ## Before you open a PR
 
 ```bash
-for f in bin/subpowers bin/chatgpt-image bin/antigravity-image bin/doctor bin/update-codex install.sh; do /bin/bash -n "$f"; done
-python3 -m py_compile bin/resolve-drivers
+for f in bin/subpowers bin/chatgpt-image bin/antigravity-image bin/grok-image bin/doctor bin/update-codex install.sh; do /bin/bash -n "$f"; done
+python3 -m py_compile bin/resolve-drivers bin/library bin/slideshow bin/imgops
 bash tests/run.sh   # every painter end to end against stub CLIs; paints nothing, spends no quota
 bash install.sh --dest /tmp/subpowers-test --no-doctor   # installer dry run
 subpowers doctor
@@ -41,8 +41,8 @@ A painter is `bin/<name>-image` with the same contract as `bin/chatgpt-image`:
 - it calls the provider CLI's own built-in image tool (never a script that fakes an image, never an API key)
 - exit codes: 2 usage, 3 not logged in, 5 painted but not delivered (the front door never paints again), 127 CLI missing, 1 anything else
 
-Then add it to `bin/subpowers`, `bin/doctor`, the README painter table and `SKILL.md`.
+Then add it to `bin/subpowers`, `bin/doctor`, the README painter table, `SKILL.md` and a line in `CHANGELOG.md`.
 
 ## Where to start
 
-Look at [ROADMAP.md](ROADMAP.md) and the issues labeled `good first issue`. The Studio (reference sets) is the big one.
+Look at [ROADMAP.md](ROADMAP.md) and the issues labeled `good first issue`. Video (`subpowers video`) and the Studio page are the big ones.

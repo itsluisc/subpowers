@@ -12,12 +12,13 @@ If `subpowers` is not on PATH, run `bash ~/.claude/skills/subpowers/bin/subpower
 ## Commands
 
 ```bash
-subpowers image "<prompt>" /abs/out.png [--painter chatgpt|antigravity|grok|council] [--size WxH] [--ref photo.jpg]... [--refs NAME]
+subpowers image "<prompt>" /abs/out.png [--painter chatgpt|google|grok|council] [--size WxH] [--ref photo.jpg]... [--refs NAME]
 subpowers refs add NAME photo1.jpg photo2.heic ...     # save a reference set once (a person, a product, a world)
 subpowers sheet NAME /abs/sheet.png [--painter all]     # character sheet: front, profiles, 3/4, back, face close-up
 subpowers storyboard shots.txt /abs/outdir [--refs NAME] [--painter P] [--style "..."]   # one frame per line + a board
 subpowers powers      # which subscriptions are connected right now
 subpowers doctor      # live-checks every painter and names the exact fix
+subpowers --version   # which version is installed
 ```
 
 - stdout is the saved path (for `all`: one path per painter, then the side-by-side sheet). Beside each image: `out.prompt.txt` (prompt, the prompt the model received, model, C2PA signer, timings) and `out.original.*` when resized or converted.
@@ -26,10 +27,10 @@ subpowers doctor      # live-checks every painter and names the exact fix
 
 ## Pick the painter
 
-| | `chatgpt` (default when connected) | `antigravity` | `grok` |
+| | `chatgpt` (default when connected) | `google` (also accepts `antigravity`) | `grok` |
 |---|---|---|---|
 | Model | OpenAI's current image model | Google's Nano Banana 2 | xAI's Grok Imagine |
-| Speed | 60 to 100 s | 17 to 40 s | 32 to 46 s |
+| Speed | 60 to 100 s | 20 to 120 s | 45 to 100 s |
 | Best at | text in images, precise product fidelity | fast drafts, likeness from references, photoreal | bold stylized looks, a third opinion |
 | Sizes | 1024x1024, 1536x1024, 1024x1536 exact; near shapes resized | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 |
 | References | any number | up to 3 (extra ones dropped) | yes (image edit; the first photo is padded to the asked shape so the scene paints wide) |
@@ -53,7 +54,7 @@ subpowers doctor      # live-checks every painter and names the exact fix
 
 ## Storyboards
 
-Write the shot list yourself (one shot per line: framing, action, setting), save it to a text file, then run `storyboard`. Frames paint in parallel (3 at a time, `SUBPOWERS_PARALLEL`), and `storyboard.jpg` shows them in order. Use `--refs NAME` so the same person appears in every shot, and `--style` for one consistent look. Antigravity is the fastest painter for boards.
+Write the shot list yourself (one shot per line: framing, action, setting), save it to a text file, then run `storyboard`. Frames paint in parallel (3 at a time, `SUBPOWERS_PARALLEL`), and `storyboard.jpg` shows them in order. Use `--refs NAME` so the same person appears in every shot, and `--style` for one consistent look.
 
 ## Video
 
