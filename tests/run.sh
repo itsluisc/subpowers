@@ -125,6 +125,18 @@ fi
 check "receipt" test -f "$C/out/mug.prompt.txt"
 check "one paint" paints 1 agy
 
+newcase "antigravity: a Linux file login reaches the isolated profile"
+mkdir -p "$C/home/.gemini/antigravity-cli"; printf 'token\n' >"$C/home/.gemini/antigravity-cli/antigravity-oauth-token"
+run STUB_AGY_FILE_TOKEN=1 bash "$bin/antigravity-image" "a red mug" "$C/out/mug.png" --size 1024x1024
+check "exit 0" exits 0
+check "one paint" paints 1 agy
+check "the login file is untouched" has "$C/home/.gemini/antigravity-cli/antigravity-oauth-token" "token"
+
+newcase "antigravity: no login file on Linux names the fix"
+run STUB_AGY_FILE_TOKEN=1 bash "$bin/antigravity-image" "a red mug" "$C/out/mug.png" --size 1024x1024
+check "fails" bash -c '[ "$1" != 0 ]' _ "$rc"
+check "tells you to sign in" has "$C/stderr" "not logged in"
+
 newcase "antigravity: 16:9 jpg cropped and resized to 1600x900"
 run bash "$bin/antigravity-image" "a harbor at dawn" "$C/out/harbor.jpg" --size 1600x900
 check "exit 0" exits 0

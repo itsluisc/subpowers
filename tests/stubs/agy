@@ -47,6 +47,11 @@ elif cmd[:1] == ["models"]:
     if os.environ.get("STUB_AGY_LOGGED_OUT"):
         print("Please sign in: run agy")
         sys.exit(1)
+    # Linux agy keeps its login as a file inside the profile (macOS uses the Keychain).
+    if os.environ.get("STUB_AGY_FILE_TOKEN") and not os.path.exists(
+            os.path.join(profile, "antigravity-cli", "antigravity-oauth-token")):
+        print("Error: Please sign in to view available models.")
+        sys.exit(1)
     fails = int(os.environ.get("STUB_AGY_MODELS_FAIL", "0"))  # the first N lookups fail, like a network blip
     if fails:
         count = os.path.join(os.path.expanduser("~"), ".stub-agy-models-calls")

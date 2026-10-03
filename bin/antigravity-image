@@ -146,6 +146,10 @@ mkdir -p "$profile/config/projects" "$work" "$atmp" "$shim"
 [[ -f "$HOME/.gemini/config/projects/default-cli-project.json" ]] && \
   cp "$HOME/.gemini/config/projects/default-cli-project.json" "$profile/config/projects/default-cli-project.json"
 printf '{"mcpServers":{}}\n' > "$profile/config/mcp_config.json"
+# On Linux agy keeps its login as a file in the profile (macOS: the Keychain),
+# so the isolated profile links it in. A link, so a refreshed token lands back home.
+token="$HOME/.gemini/antigravity-cli/antigravity-oauth-token"
+[[ -f "$token" ]] && mkdir -p "$profile/antigravity-cli" && ln -s "$token" "$profile/antigravity-cli/antigravity-oauth-token"
 # If OAuth is broken agy may try to open a login page; refuse loudly instead.
 printf '#!/bin/sh\necho "[antigravity-image] browser launch blocked: agy wants a login. Run agy once in a terminal." >&2\nexit 88\n' > "$shim/open"
 chmod 700 "$shim/open"
