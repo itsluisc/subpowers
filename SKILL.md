@@ -106,3 +106,10 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 - `bin/doctor`, `bin/resolve-drivers`, `bin/update-codex`: health check, newest-model choice, codex freshness.
 - Reference sets live in `$SUBPOWERS_HOME/refs/NAME/` (default `~/.subpowers`).
 - `install.sh`, `README.md`, `ROADMAP.md`, `CONTRIBUTING.md`.
+
+## Change Log
+
+- 2026-10-02 (Claude, for Luis): two speed fixes in `bin/subpowers`, found by timing every painter alone.
+  1. A login probe that TIMES OUT (exit 124 or 142) is no longer read as "logged out" and cached OFF for 10 minutes. On a busy Mac that skipped Nano Banana ("not connected") while it was logged in. Timeout now means assume connected; the real call tells the truth.
+  2. `--refs` and `--ref` pictures are shrunk once to 1280 px JPEG and cached in `~/.cache/subpowers/refs-small/`. A 4096 px phone photo kept Nano Banana busy for over 400 s with three references; shrunk, the same job takes 25 s. Measured with the luis shelf: Nano Banana 25 s, Grok 43 s, ChatGPT 60 s.
+  Backup: `~/.claude/backups/subpowers.before-timeout-fix-2026-10-02`.
