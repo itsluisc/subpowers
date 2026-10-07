@@ -97,6 +97,7 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 | `grok is not logged in` / exit 4 `SuperGrok feature` | `grok login` with a grok.com account that has SuperGrok |
 | `dry (quota)` | that plan's usage is spent; `auto` already moves to the next painter |
 | `no image_gen output` / `no generate_image output` / `never called image_gen` | the helper skipped the tool; rerun, or reword a prompt that reads like a policy refusal |
+| native AGY 1.3.1 `unknown tool: generate_image` | permissions cannot register the missing executor; the full official Linux app 2.21.0 was verified as a native alternative, but desktop auth is separate and its observed painter was Nano Banana 2, not 2.1 |
 | `WARNING ... aspect` / `UPSCALED` | not an error: the receipt says exactly what was cropped or enlarged |
 | `no reference set 'NAME'` | `subpowers refs add NAME photo1.jpg ...` |
 

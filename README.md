@@ -247,6 +247,16 @@ missing executor. A native text login or a text `SUCCESS` does not prove image
 generation. Default transport stays **native**. Failure profiles no longer retain
 copied OAuth tokens.
 
+**A native alternative was verified:** the official full Antigravity 2.21.0
+Linux app successfully executed `generate_image` on a headless VPS with a
+virtual display and window manager. Its desktop Google login is separate from
+the CLI login. You can operate that app through a private remote desktop;
+installing the app or seeing its Remote Control instance online alone is not
+image proof. This is a separate runtime, not a repaired `agy -p` 1.3.1 executor.
+The observed image model in that test was `gemini-3.1-flash-image` (Nano Banana 2),
+not 2.1. This package does not silently drive a desktop UI or promise a native
+2.1 rollout; the CLI default remains unchanged.
+
 An **optional, unofficial** transport exists for users who have independently
 configured an Antigravity OAuth CLIProxy on loopback and accepted the provider's
 terms risk. It is not enabled or installed automatically:
