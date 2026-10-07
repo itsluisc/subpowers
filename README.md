@@ -219,6 +219,56 @@ Never ask the user for an API key, and never put one in. subpowers only uses the
 
 ## Good to know
 
+### Linux / VPS jobs that survive disconnects
+
+Install subpowers and log into your own native CLIs **on the remote host** first.
+No tokens or personal files are copied by these commands. SSH must already work,
+and Linux must provide `systemd-run` (system manager for root; user manager for
+other users). Images are generated on the provider's servers, not a VPS GPU.
+
+```bash
+subpowers remote my-vps image "a single yellow banana on a white table, photoreal, no text" --painter chatgpt
+# Keep the returned job ID. This starts a bounded, persistent systemd job.
+subpowers remote my-vps status JOB_ID
+subpowers remote my-vps fetch JOB_ID /absolute/local/banana.png
+```
+
+Reconnect to the same job after a disconnect; don't resubmit an unknown outcome.
+Jobs are kept in `~/.subpowers/jobs/` on the VPS with status, logs, image and
+provenance. They are not automatically deleted or backed up. Media upload to an
+archive and checksum verification remain separate operations. Up to 1.5 GB RAM,
+one CPU, and 16 minutes per image job; no unattended recurring generations.
+
+### AGY image-tool availability and model truth
+
+AGY 1.3.1 can advertise `generate_image` but reject it as an unknown tool.
+`--dangerously-skip-permissions` approves existing tools; it cannot register a
+missing executor. A native text login or a text `SUCCESS` does not prove image
+generation. Default transport stays **native**. Failure profiles no longer retain
+copied OAuth tokens.
+
+An **optional, unofficial** transport exists for users who have independently
+configured an Antigravity OAuth CLIProxy on loopback and accepted the provider's
+terms risk. It is not enabled or installed automatically:
+
+```bash
+AGY_IMAGE_TRANSPORT=cliproxy subpowers image "a banana" /absolute/banana.png --painter antigravity
+```
+
+It sends no Google Developer API key. `AGY_IMAGE_PROXY_URL` must be a loopback HTTP
+origin; redirects and remote image URLs are refused. Proxy key defaults to
+`~/.cli-proxy-api/.local-key`. `AGY_PROXY_IMAGE_MODEL` defaults to the verified
+`gemini-3.1-flash-image` (Nano Banana 2) and must be listed under the proxy's
+Antigravity provider; unknown model requests fail instead of silently downgrading.
+One HTTP generation request, no automatic retry. A JSON sidecar records the
+requested and response-observed IDs, exact transport, dimensions, and SHA256.
+It explicitly says **not fixed native AGY**. Tests use a local fake proxy only.
+
+Nano Banana 2.1 is available on Higgsfield under `nano_banana_2_1`; this is not
+proof of an AGY ID or rollout. Native painters are server-selected, which is not
+a guarantee of the latest marketing model. Trust the actual receipt. Use an
+official provider surface if its native CLI cannot generate an image.
+
 - Images use your plan's normal usage limits; an image costs more of your allowance than a text message. If a plan runs out, that painter says so and the default mode moves to your next plan. It never switches to a paid API.
 - This rides on the official `codex`, `agy` and `grok` command-line tools, not on a published image API, so providers can change behavior. The doctor and the daily codex update are there for exactly that.
 - The `agy` CLI has no per-tool allowlist, so the Google painter cannot limit its helper to the image tool. Each call skips agy's permission prompts, so it runs with `--sandbox`, an empty temporary profile (no MCP servers) and a temporary folder.

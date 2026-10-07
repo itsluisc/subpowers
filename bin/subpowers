@@ -463,6 +463,7 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
   think|plan) exec bash "$here/think" "$@" ;;
   slideshow|slider) exec python3 "$here/slideshow" "$@" ;;
   library|lib) exec python3 "$here/library" "$@" ;;
+  remote) exec python3 "$here/remote" "$@" ;;
   canary) exec python3 "$here/canary" "$@" ;;
   doctor) exec bash "$here/doctor" "$@" ;;
   powers)

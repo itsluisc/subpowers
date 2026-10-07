@@ -28,7 +28,7 @@ subpowers doctor      # live-checks every painter and names the exact fix
 
 | | `chatgpt` (default when connected) | `antigravity` | `grok` |
 |---|---|---|---|
-| Model | OpenAI's current image model | Google's Nano Banana 2 | xAI's Grok Imagine |
+| Model | OpenAI's server-chosen image model | Google's server-chosen Nano Banana; actual ID in receipt | xAI's server-chosen Grok Imagine |
 | Speed | 60 to 100 s | 17 to 40 s | 32 to 46 s |
 | Best at | text in images, precise product fidelity | fast drafts, likeness from references, photoreal | bold stylized looks, a third opinion |
 | Sizes | 1024x1024, 1536x1024, 1024x1536 exact; near shapes resized | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 |
@@ -83,7 +83,7 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 
 ## Always the best model
 
-- Painters are chosen server-side by OpenAI, Google and xAI on every call, so they cannot go stale. Grok asks for xAI's quality Imagine model and falls back to xAI's default when a plan lacks it (the receipt names which one painted).
+- Server-side selection is not proof of the newest model. Receipts distinguish requested and observed image IDs. Do not rename an old result after a product announcement. Grok asks for xAI's quality Imagine model and falls back to xAI's default when a plan lacks it.
 - Helper models run at high effort (they write the prompt the painter sees). ChatGPT: codex's own per-account model list, newest first; codex updates itself daily (`SUBPOWERS_NO_AUTOUPDATE=1` opts out). Antigravity: the newest Gemini Flash at High. Grok: the newest non-fast model in `grok models`.
 - The user's own picks live in `~/.subpowers/config` (`KEY=value`: `CHATGPT_IMAGE_DRIVERS`, `CHATGPT_IMAGE_EFFORT`, `AGY_IMAGE_EFFORT`, `GROK_IMAGE_EFFORT`, `GROK_IMAGE_MODEL`). Respect them; don't override them with flags unless the user asks.
 
@@ -106,3 +106,7 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 - `bin/doctor`, `bin/resolve-drivers`, `bin/update-codex`: health check, newest-model choice, codex freshness.
 - Reference sets live in `$SUBPOWERS_HOME/refs/NAME/` (default `~/.subpowers`).
 - `install.sh`, `README.md`, `ROADMAP.md`, `CONTRIBUTING.md`.
+
+## Change Log
+
+- 2026-10-07: AGY 1.3.1 may advertise `generate_image` while its executor cannot run it. Added explicit `AGY_IMAGE_TRANSPORT=cliproxy` fallback using an existing loopback Antigravity OAuth proxy, never Google API keys. Default remains native; unofficial proxy access can violate provider terms. `AGY_PROXY_IMAGE_MODEL` must be exposed by that provider; default verified ID is `gemini-3.1-flash-image` (Nano Banana 2), not a guessed 2.1 alias. Higgsfield lists Nano Banana 2.1 under its own ID `nano_banana_2_1`; that does not establish the AGY ID. See README for setup and limitations.

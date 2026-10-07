@@ -12,8 +12,9 @@
 #            Antigravity backend names the image model in its fetchAvailableModels
 #            reply (imageGenerationModelIds), so the painter is SERVER-CHOSEN and
 #            this door cannot pin or downgrade it. On 2026-09-25 every run recorded
-#            model_name "gemini-3.1-flash-image" in the step, which is Gemini 3.1
-#            Flash Image = Nano Banana 2 (GA 2026-05-28 per Google's model page).
+#            model_name in the step. Through 2026-10-02 that was gemini-3.1-flash-image
+#            (Nano Banana 2). Marketing labels such as Nano Banana 2.1 are not
+#            verified AGY model IDs. Only provider-observed IDs enter receipts.
 #            The door reads that name back out of the conversation store after
 #            every run and writes it into the sidecar, so a server-side switch
 #            shows up the same day.
@@ -74,6 +75,17 @@ while [[ -L "$src" ]]; do
 done
 here="$(cd "$(dirname "$src")" && pwd)"
 me="antigravity-image"
+
+# Explicit opt-in only: this transport is unofficial third-party AGY access and
+# may violate provider terms. It does NOT fix AGY's missing generate_image tool.
+# Never fall back on timeout, quota or a lost response (could paint twice).
+case "${AGY_IMAGE_TRANSPORT:-native}" in
+  native) ;;
+  cliproxy)
+    exec python3 "$here/cliproxy-image" "$@"
+    ;;
+  *) echo "$me: AGY_IMAGE_TRANSPORT must be native or cliproxy" >&2; exit 2 ;;
+esac
 
 usage() { echo "usage: $me \"<prompt>\" <out.png|out.jpg> [--size WxH] [--aspect R] [--ref IMG]... [--driver MODEL]" >&2; exit 2; }
 [[ $# -lt 2 ]] && usage
@@ -141,15 +153,25 @@ stem="${out%.*}"
 tmpbase="${TMPDIR:-/tmp}"; tmpbase="${tmpbase%/}"
 root="$(mktemp -d "$tmpbase/antigravity-image.XXXXXX")"
 profile="$root/profile"; work="$root/work"; atmp="$root/tmp"; shim="$root/no-browser"
-mkdir -p "$profile/config/projects" "$work" "$atmp" "$shim"
+mkdir -p "$profile/config/projects" "$profile/antigravity-cli" "$work" "$atmp" "$shim"
 [[ -f "$HOME/.gemini/config/config.json" ]] && cp "$HOME/.gemini/config/config.json" "$profile/config/config.json"
 [[ -f "$HOME/.gemini/config/projects/default-cli-project.json" ]] && \
   cp "$HOME/.gemini/config/projects/default-cli-project.json" "$profile/config/projects/default-cli-project.json"
+
+# Isolated profile used to drop login: copy the OAuth token the live agy session uses.
+if [[ -f "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]]; then
+  cp "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" "$profile/antigravity-cli/antigravity-oauth-token"
+  chmod 600 "$profile/antigravity-cli/antigravity-oauth-token"
+fi
+[[ -f "$HOME/.gemini/antigravity-cli/installation_id" ]] && cp "$HOME/.gemini/antigravity-cli/installation_id" "$profile/antigravity-cli/installation_id"
 printf '{"mcpServers":{}}\n' > "$profile/config/mcp_config.json"
 # If OAuth is broken agy may try to open a login page; refuse loudly instead.
 printf '#!/bin/sh\necho "[antigravity-image] browser launch blocked: agy wants a login. Run agy once in a terminal." >&2\nexit 88\n' > "$shim/open"
 chmod 700 "$shim/open"
 log="$root/agy.jsonl"; err="$root/agy.err"
+# Failure logs remain useful, copied credentials do not. Never retain the token
+# in kept troubleshooting directories, including failed model-list probes.
+trap 'rm -f "$profile/antigravity-cli/antigravity-oauth-token"' EXIT
 
 agy_env() {
   env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_GENAI_USE_VERTEXAI \
@@ -259,6 +281,10 @@ done
 wall=$(( $(date +%s) - t0 ))
 
 if [[ -z "$ok" ]]; then
+  if grep -qiE 'unknown tool.*generate_image|generate_image.*unavailable' "$log" "$err"; then
+    echo "$me: native AGY generate_image is unavailable in this CLI. Skip-permissions cannot register it." >&2
+    echo "$me: optional unofficial fallback: AGY_IMAGE_TRANSPORT=cliproxy (requires an already configured loopback OAuth proxy; check provider terms)." >&2
+  fi
   echo "$me: agy run failed (rc=$rc). Tail:" >&2
   tail -n 15 "$log" "$err" >&2
   echo "(workdir kept: $root)" >&2
@@ -305,9 +331,10 @@ if cid and os.path.exists(db):
     blob = b""
     for f in (db, db + "-wal"):
         if os.path.exists(f): blob += open(f, "rb").read()
-    for m in re.finditer(rb"gemini-[0-9][0-9a-z.\-]*image", blob):
+# Accept observed future IDs, but never infer a rollout from a marketing name.
+    for m in re.finditer(rb"(?:gemini-nano-banana-[0-9.]+|gemini-[0-9][0-9a-z.\-]*image[0-9a-z.\-]*)", blob):
         s = m.start(); n = blob[s - 1] if s else 0
-        name = blob[s:s + n].decode("ascii", "replace") if 10 <= n <= 60 else m.group().decode()
+        name = blob[s:s + n].decode("ascii", "replace") if 8 <= n <= 80 else m.group().decode()
         if re.fullmatch(r"gemini-[0-9a-z.\-]+", name) and name not in models: models.append(name)
 last = calls[-1] if calls else {}
 print(json.dumps({"cid": cid, "calls": len(calls), "saved": saved, "tool_s": tool_s,
@@ -321,6 +348,7 @@ passed_prompt="$(field passed_prompt)"; passed_aspect="$(field passed_aspect)"
 passed_refs="$(field passed_refs)"; painter_ids="$(field models)"
 
 if [[ -z "$img" || ! -f "$img" ]]; then
+  echo "$me: native AGY did not deliver an image; a text SUCCESS is not image success." >&2
   echo "$me: agy finished but no generate_image output was found (tool calls seen: ${calls}). The tool may not have been called." >&2
   tail -n 10 "$log" >&2; echo "(workdir kept: $root)" >&2
   exit 1
