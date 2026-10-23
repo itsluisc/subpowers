@@ -6,15 +6,21 @@
 # (https://github.com/itsluisc/subpowers); same contract as bin/chatgpt-image.
 #
 # WHO PAINTS (read from agy 1.2.11 on 2026-09-25, not guessed):
-#   painter  agy's built-in `generate_image` tool. Its arguments are Prompt,
+#   painter  agy's built-in `generate_image` tool. Since agy 1.2.16 only the built-in
+#            `image-generator` subagent holds it: the main agent still LISTS generate_image
+#            but a direct call fails "unknown tool" (measured on agy 1.4.6, 2026-10-23), so
+#            the door asks the main agent to delegate to that subagent with the prompt
+#            verbatim. Its arguments are Prompt,
 #            ImageName, ImagePaths (max 3 references) and AspectRatio
 #            (1:1 2:3 3:2 3:4 4:3 9:16 16:9). There is NO model argument: the
 #            Antigravity backend names the image model in its fetchAvailableModels
 #            reply (imageGenerationModelIds), so the painter is SERVER-CHOSEN and
 #            this door cannot pin or downgrade it. On 2026-09-25 every run recorded
-#            model_name "gemini-3.1-flash-image" in the step, which is Gemini 3.1
-#            Flash Image = Nano Banana 2 (GA 2026-05-28 per Google's model page).
-#            The door reads that name back out of the conversation store after
+#            model_name in the step. Through 2026-10-02 that was gemini-3.1-flash-image
+#            (Nano Banana 2). Marketing labels such as Nano Banana 2.1 are not
+#            verified AGY model IDs. Only provider-observed IDs enter receipts.
+#            The door reads that name back out of the conversation stores (the
+#            subagent runs as its own conversation inside the isolated profile) after
 #            every run and writes it into the sidecar, so a server-side switch
 #            shows up the same day.
 #   driver   the chat model that calls the tool (`agy --model`), picked per call
@@ -141,15 +147,25 @@ stem="${out%.*}"
 tmpbase="${TMPDIR:-/tmp}"; tmpbase="${tmpbase%/}"
 root="$(mktemp -d "$tmpbase/antigravity-image.XXXXXX")"
 profile="$root/profile"; work="$root/work"; atmp="$root/tmp"; shim="$root/no-browser"
-mkdir -p "$profile/config/projects" "$work" "$atmp" "$shim"
+mkdir -p "$profile/config/projects" "$profile/antigravity-cli" "$work" "$atmp" "$shim"
 [[ -f "$HOME/.gemini/config/config.json" ]] && cp "$HOME/.gemini/config/config.json" "$profile/config/config.json"
 [[ -f "$HOME/.gemini/config/projects/default-cli-project.json" ]] && \
   cp "$HOME/.gemini/config/projects/default-cli-project.json" "$profile/config/projects/default-cli-project.json"
+
+# Isolated profile used to drop login: copy the OAuth token the live agy session uses.
+if [[ -f "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" ]]; then
+  cp "$HOME/.gemini/antigravity-cli/antigravity-oauth-token" "$profile/antigravity-cli/antigravity-oauth-token"
+  chmod 600 "$profile/antigravity-cli/antigravity-oauth-token"
+fi
+[[ -f "$HOME/.gemini/antigravity-cli/installation_id" ]] && cp "$HOME/.gemini/antigravity-cli/installation_id" "$profile/antigravity-cli/installation_id"
 printf '{"mcpServers":{}}\n' > "$profile/config/mcp_config.json"
 # If OAuth is broken agy may try to open a login page; refuse loudly instead.
 printf '#!/bin/sh\necho "[antigravity-image] browser launch blocked: agy wants a login. Run agy once in a terminal." >&2\nexit 88\n' > "$shim/open"
 chmod 700 "$shim/open"
 log="$root/agy.jsonl"; err="$root/agy.err"
+# Failure logs remain useful, copied credentials do not. Never retain the token
+# in kept troubleshooting directories, including failed model-list probes.
+trap 'rm -f "$profile/antigravity-cli/antigravity-oauth-token"' EXIT
 
 agy_env() {
   env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_GENAI_USE_VERTEXAI \
@@ -201,21 +217,22 @@ for r in ${refs[@]+"${refs[@]}"}; do
   ref_list="${ref_list:+$ref_list, }\"$work/$local_name\""
 done
 
-rules="- Call the built-in generate_image tool exactly once. Set Prompt to the PROMPT above copied verbatim (do not rewrite, shorten or embellish it), AspectRatio to \"${aspect}\", and ImageName to \"door_image\".
-- Do not use run_command, Python, curl, an API key, a browser, a subagent, or any MCP tool. Do not create, copy or edit any file yourself.
-- After the tool returns, reply with only the absolute path the tool saved the image to."
+rules="- Delegate the painting to your built-in image-generator subagent (agy 1.2.16+ moved generate_image into it; calling generate_image yourself fails with unknown tool). Invoke it exactly once.
+- Tell the subagent: use the PROMPT above copied verbatim as the image prompt (do not rewrite, shorten or embellish it), aspect ratio ${aspect}, make exactly ONE image, name it door_image.
+- Do not use run_command, Python, curl, an API key, a browser, any other subagent, or any MCP tool. Do not create, copy or edit any file yourself.
+- After the subagent returns, reply with only the absolute path where the image was saved."
 if [[ $n -eq 0 ]]; then
-  task="Use your built-in generate_image tool to create one brand new image.
+  task="Create one brand new image with your built-in image-generator subagent.
 
 PROMPT: ${prompt}
 
 Requirements:
 ${rules}
-- Do not pass ImagePaths; this is a new image."
+- Pass no reference images; this is a new image."
 else
   task="There are ${n} reference image(s) at these absolute paths: [${ref_list}]
 
-Use your built-in generate_image tool to create one NEW image, and pass ALL of those paths in ImagePaths so the image model sees them.
+Create one NEW image with your built-in image-generator subagent, and have it pass ALL of those paths to its image tool as reference images so the image model sees them.
 
 PROMPT: ${prompt}
 
@@ -259,6 +276,9 @@ done
 wall=$(( $(date +%s) - t0 ))
 
 if [[ -z "$ok" ]]; then
+  if grep -qiE 'unknown tool.*generate_image|generate_image.*unavailable' "$log" "$err"; then
+    echo "$me: native AGY generate_image is unavailable in this CLI, and the image-generator subagent did not paint either (agy changed its image path again?). Skip-permissions cannot register it." >&2
+  fi
   echo "$me: agy run failed (rc=$rc). Tail:" >&2
   tail -n 15 "$log" "$err" >&2
   echo "(workdir kept: $root)" >&2
@@ -280,10 +300,12 @@ for line in open(log, errors="replace"):
     if su.get("tool_name") == "generate_image" and su.get("state") == "DONE":
         tool_s = su.get("duration_seconds", tool_s)
     if ev.get("result"): response = ev["result"].get("response", "")
-brain = os.path.join(profile, "antigravity-cli", "brain", cid)
+# agy 1.2.16+ paints inside the built-in image-generator subagent, which runs as its
+# own conversation: read every transcript and conversation store in this isolated
+# profile (a fresh temp profile, so everything in it came from this run).
+cli = os.path.join(profile, "antigravity-cli")
 calls = []; media = []
-tf = os.path.join(brain, ".system_generated", "logs", "transcript_full.jsonl")
-if cid and os.path.exists(tf):
+for tf in sorted(glob.glob(os.path.join(cli, "brain", "*", ".system_generated", "logs", "transcript_full.jsonl"))):
     for line in open(tf, errors="replace"):
         try: st = json.loads(line)
         except Exception: continue
@@ -294,20 +316,20 @@ if cid and os.path.exists(tf):
             if str(md.get("mime_type", "")).startswith("image/") and u.startswith("file://"):
                 media.append(u[7:])
 saved = next((p for p in reversed(media) if os.path.isfile(p)), "")
-if not saved and cid:
-    imgs = [p for p in glob.glob(os.path.join(brain, "*")) if p.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))]
+if not saved:
+    imgs = [p for p in glob.glob(os.path.join(cli, "brain", "*", "*")) if p.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))]
     if imgs: saved = max(imgs, key=os.path.getmtime)
 # The step record in the conversation store carries model_name as a
 # length-prefixed protobuf string; read it back exactly, never by pattern alone.
 models = []
-db = os.path.join(profile, "antigravity-cli", "conversations", cid + ".db")
-if cid and os.path.exists(db):
+for db in sorted(glob.glob(os.path.join(cli, "conversations", "*.db"))):
     blob = b""
     for f in (db, db + "-wal"):
         if os.path.exists(f): blob += open(f, "rb").read()
-    for m in re.finditer(rb"gemini-[0-9][0-9a-z.\-]*image", blob):
+# Accept observed future IDs, but never infer a rollout from a marketing name.
+    for m in re.finditer(rb"(?:gemini-nano-banana-[0-9.]+|gemini-[0-9][0-9a-z.\-]*image[0-9a-z.\-]*)", blob):
         s = m.start(); n = blob[s - 1] if s else 0
-        name = blob[s:s + n].decode("ascii", "replace") if 10 <= n <= 60 else m.group().decode()
+        name = blob[s:s + n].decode("ascii", "replace") if 8 <= n <= 80 else m.group().decode()
         if re.fullmatch(r"gemini-[0-9a-z.\-]+", name) and name not in models: models.append(name)
 last = calls[-1] if calls else {}
 print(json.dumps({"cid": cid, "calls": len(calls), "saved": saved, "tool_s": tool_s,
@@ -321,6 +343,7 @@ passed_prompt="$(field passed_prompt)"; passed_aspect="$(field passed_aspect)"
 passed_refs="$(field passed_refs)"; painter_ids="$(field models)"
 
 if [[ -z "$img" || ! -f "$img" ]]; then
+  echo "$me: native AGY did not deliver an image; a text SUCCESS is not image success." >&2
   echo "$me: agy finished but no generate_image output was found (tool calls seen: ${calls}). The tool may not have been called." >&2
   tail -n 10 "$log" >&2; echo "(workdir kept: $root)" >&2
   exit 1
@@ -434,7 +457,7 @@ fi
   echo "  driver model: ${used} (chain: ${chain}; effort ${effort})"
   echo "  image model: ${painter}"
   echo "  C2PA: ${c2pa}"
-  echo "  generate_image calls: ${calls}; tool time: ${tool_s}s; door wall: ${wall}s"
+  echo "  generate_image calls: ${calls}; tool time: ${tool_s:+${tool_s}s}${tool_s:-n/a (ran inside the image-generator subagent)}; door wall: ${wall}s"
   echo "  aspect requested: ${aspect}; aspect passed: ${passed_aspect:-<default 1:1>}"
   echo "  references: ${n}${refs[0]+ ($(printf '%s ' "${refs[@]}"))}; passed ImagePaths: ${passed_refs:-none}"
   echo "  requested size: ${size:-model choice}"
