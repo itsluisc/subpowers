@@ -43,11 +43,11 @@ set -euo pipefail
 
 # Per-user defaults: KEY=value lines in ~/.subpowers/config ($SUBPOWERS_HOME/config),
 # e.g. CHATGPT_IMAGE_DRIVERS=gpt-6-sol to keep a frontier model's quota free.
-# Only painter keys are read; a variable already set in the environment wins.
+# Only painter keys and SUBPOWERS_NO_AUTOUPDATE are read; a variable already set in the environment wins.
 sp_cfg="${SUBPOWERS_HOME:-$HOME/.subpowers}/config"
 if [[ -f "$sp_cfg" ]]; then
   while IFS='=' read -r sp_k sp_v || [[ -n "$sp_k" ]]; do
-    [[ "$sp_k" =~ ^(CHATGPT|AGY|GROK)_IMAGE_[A-Z_]+$ ]] || continue
+    [[ "$sp_k" =~ ^((CHATGPT|AGY|GROK)_IMAGE_[A-Z_]+|SUBPOWERS_NO_AUTOUPDATE)$ ]] || continue
     sp_v="${sp_v%\"}"; sp_v="${sp_v#\"}"
     [[ -z "${!sp_k+x}" ]] && export "$sp_k=$sp_v"
   done < "$sp_cfg"

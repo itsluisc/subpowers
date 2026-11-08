@@ -251,6 +251,10 @@ if [[ -z "$saved" || ! -f "$saved" ]]; then
   elif [[ -n "$terr" ]]; then
     echo "grok-image: the ${tool} tool failed: ${terr}" >&2
     if grep -qi "SuperGrok feature" <<<"$terr"; then exit 4; fi
+  elif grep -qiE "402|payment required|balance exhausted|quota|429|rate.?limit|resource.?exhausted" "$err" 2>/dev/null; then
+    # Out of quota or balance before any tool ran (seen 2026-09-26: "Grok Build usage balance exhausted").
+    why="$(grep -iE "402|payment required|balance exhausted|quota|429|rate.?limit|resource.?exhausted" "$err" | head -n 1 | sed -E 's/^.*"message": *"//; s/",?$//')"
+    echo "grok-image: dry (quota): ${why}. Try another painter, or --painter auto." >&2
   elif [[ "$ncalls" == "0" ]]; then
     echo "grok-image: grok finished (exit ${rc}, ${wall}s) but never called ${tool}. Rerun, or reword a prompt that reads like a policy refusal. Reply: $(field reply)" >&2
   else

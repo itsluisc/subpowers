@@ -1,7 +1,8 @@
 <h1 align="center">subpowers</h1>
 
 <p align="center"><b>Your coding agent makes images on the ChatGPT, Google and Grok plans you already pay for.</b><br>
-No API key. No per-image bill. One prompt, three plans, you pick.</p>
+No API key. No per-image bill. One prompt, three plans, you pick.<br>
+<sub>Needs a paid ChatGPT, Google AI or SuperGrok plan. Built and tested on a Mac.</sub></p>
 
 <p align="center"><picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="assets/hero-still.jpg">
@@ -83,7 +84,7 @@ Every caption comes from the receipt saved next to the image.
 
 ## Every image comes with a receipt
 
-AI images are about to get questioned everywhere. subpowers saves a plain-text receipt next to each one: your prompt, the prompt the model actually received, which painter and helper model ran, the content credential (C2PA) the provider embedded in the image, sizes and timings. A real one, from the first scene in "Same cast, every scene" (folder paths trimmed):
+Every image gets a receipt: a plain-text file saved next to it that says who made it and how. It holds your prompt, the prompt the model actually received, which painter and helper model ran, the content credential (C2PA) the provider embedded in the image, sizes and timings. A real one, from the first scene in "Same cast, every scene" (folder paths trimmed):
 
 ```text
 PROMPT (as given):
@@ -102,7 +103,7 @@ provenance:
   image_gen saved_path: ~/.codex/generated_images/01a0db4a-.../exec-77922a9d-....png
 ```
 
-The receipt also says when an image was cropped or upscaled locally, so nothing gets passed off as something it isn't.
+The receipt also says when an image was cropped or upscaled on your machine.
 
 ## It tells you exactly what's wrong
 
@@ -133,7 +134,7 @@ The receipt also says when an image was cropped or upscaled locally, so nothing 
 |---|---|---|---|
 | You need | a ChatGPT plan with Codex access + `codex login` | a Google AI plan with Antigravity + `agy` signed in | SuperGrok + the Grok CLI + `grok login` |
 | Model | OpenAI's current image model | Nano Banana 2 (Gemini 3.1 Flash Image) | Grok Imagine (quality model) |
-| Speed (measured) | 60 to 100 s | 40 to 120 s | 45 to 100 s |
+| Speed (measured) | 60 to 100 s | 20 to 120 s | 45 to 100 s |
 | Shapes | square, 3:2, 2:3 exact; others requested | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 |
 | Reference photos | yes, any number | yes, up to 3 | yes (image edit) |
 
@@ -173,7 +174,7 @@ subpowers slideshow slider.webp a.png b.png c.png    # one looping slider of you
 |---|---|
 | The painters | OpenAI and Google pick the image model on their side on every call, so it can't go stale. Grok is asked for xAI's quality Imagine model (`grok-imagine-image-quality`); a plan without it falls back to xAI's default by itself. |
 | The helper models | The text model that hands your prompt to the painter runs at **high** effort, because it writes what the painter actually sees. ChatGPT: read fresh from codex's own model list on *your* account, newest first, retiring models skipped. Google: the newest Gemini Flash at its High setting. Grok: the newest non-fast Grok model. |
-| The codex CLI | Checked once a day and updated automatically (turn off with `SUBPOWERS_NO_AUTOUPDATE=1`). |
+| The codex CLI | Checked once a day and updated automatically. Turn it off with `SUBPOWERS_NO_AUTOUPDATE=1`, in your shell or in `~/.subpowers/config` (do this if Homebrew or npm manages your codex). |
 
 Your own picks go in `~/.subpowers/config`, one `KEY=value` per line; anything you set in the shell still wins. For example, to keep the image helper off your most expensive model so its quota stays free for real work:
 
@@ -205,7 +206,7 @@ To make any image, run:
 
 </details>
 
-Update anytime with `subpowers update`. If a copy installed before v0.3.1 stops with "commit your changes", run `git -C ~/.claude/skills/subpowers -c core.fileMode=false pull --ff-only` once (the old installer's `chmod` looked like an edit). Uninstall: delete `~/.claude/skills/subpowers` plus the links in `~/.agents/skills`, `~/.codex/skills` and `~/.local/bin`.
+Update anytime with `subpowers update` (check what you have with `subpowers --version`). If a copy installed before v0.3.1 stops with "commit your changes", run `git -C ~/.claude/skills/subpowers -c core.fileMode=false pull --ff-only` once (the old installer's `chmod` looked like an edit). Uninstall: delete `~/.claude/skills/subpowers` plus the links in `~/.agents/skills`, `~/.codex/skills` and `~/.local/bin`.
 
 ## For AI agents: how to install this for your user
 
@@ -226,10 +227,10 @@ Never ask the user for an API key, and never put one in. subpowers only uses the
 
 ## What's next: build it with us
 
-This is the first power. The [roadmap](ROADMAP.md) starts with a **Studio**: save reference sets of *you*, your products and your world once, and every agent can put them in any scene on command. After that, more powers from the subscriptions you already have.
+This is the first power. Next up is video, then a **Studio** page to browse every image with its receipt and re-run a winner in one click. See the [roadmap](ROADMAP.md).
 
 Want to build a piece of it? Read [CONTRIBUTING.md](CONTRIBUTING.md), open an issue, send a pull request, or say hi in [Discussions](https://github.com/itsluisc/subpowers/discussions). Every good idea that ships gets credited.
 
 ## Credits
 
-The ChatGPT painter started as [oakplank/gpt-image-bridge](https://github.com/oakplank/gpt-image-bridge) (MIT) and was rebuilt from there: newest-model resolver, receipts, reference photos, doctor, installer, and two more painters. Built by [Luis Carrillo](https://github.com/itsluisc) with his agent team. MIT licensed.
+The ChatGPT painter started as [oakplank/gpt-image-bridge](https://github.com/oakplank/gpt-image-bridge) (MIT) and was rebuilt from there: newest-model resolver, receipts, reference photos, doctor, installer, and two more painters. Built by [Luis Carrillo](https://github.com/itsluisc) with his agent team. MIT licensed. How the pieces fit: [architecture diagram](docs/diagrams/architecture.md). What changed: [CHANGELOG](CHANGELOG.md).

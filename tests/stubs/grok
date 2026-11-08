@@ -80,6 +80,10 @@ elif "--prompt-file" in a:
     if hang:
         time.sleep(float(hang))  # never answers: the painter's own timeout must end the call
         sys.exit(1)
+    if os.environ.get("STUB_GROK_BALANCE"):  # the CLI's own usage balance is empty (real 2026-09-26)
+        print('Error: Internal error: {\n  "message": "API error (status 402 Payment Required): '
+              'Grok Build usage balance exhausted",\n  "http_status": 402\n}', file=sys.stderr)
+        sys.exit(1)
     task = open(_stub.arg("--prompt-file")).read()
     tool = _stub.arg("--tools")
     prompt = re.search(r"<<<PROMPT\n(.*)\nPROMPT>>>", task, re.S).group(1)

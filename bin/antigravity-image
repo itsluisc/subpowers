@@ -321,6 +321,14 @@ passed_prompt="$(field passed_prompt)"; passed_aspect="$(field passed_aspect)"
 passed_refs="$(field passed_refs)"; painter_ids="$(field models)"
 
 if [[ -z "$img" || ! -f "$img" ]]; then
+  # The helper can succeed while the image tool itself is out of quota (seen 2026-09-26):
+  # say so, instead of guessing the tool was never called.
+  if grep -qiE "resource.?exhausted|429 too many requests|exhausted your capacity" "$log"; then
+    reset="$(grep -oiE "reset after ([0-9]+[hms])+" "$log" | head -n 1 | sed -E 's/^reset after /resets in /')"
+    echo "$me: dry (quota): your Google AI plan's image quota is used up${reset:+; it $reset}. Try another painter, or --painter auto." >&2
+    echo "(workdir kept: $root)" >&2
+    exit 1
+  fi
   echo "$me: agy finished but no generate_image output was found (tool calls seen: ${calls}). The tool may not have been called." >&2
   tail -n 10 "$log" >&2; echo "(workdir kept: $root)" >&2
   exit 1

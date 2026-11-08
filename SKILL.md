@@ -18,6 +18,7 @@ subpowers sheet NAME /abs/sheet.png [--painter all]     # character sheet: front
 subpowers storyboard shots.txt /abs/outdir [--refs NAME] [--painter P] [--style "..."]   # one frame per line + a board
 subpowers powers      # which subscriptions are connected right now
 subpowers doctor      # live-checks every painter and names the exact fix
+subpowers --version   # which version is installed
 ```
 
 - stdout is the saved path (for `all`: one path per painter, then the side-by-side sheet). Beside each image: `out.prompt.txt` (prompt, the prompt the model received, model, C2PA signer, timings) and `out.original.*` when resized or converted.
@@ -26,10 +27,10 @@ subpowers doctor      # live-checks every painter and names the exact fix
 
 ## Pick the painter
 
-| | `chatgpt` (default when connected) | `antigravity` | `grok` |
+| | `chatgpt` (default when connected) | `antigravity` (google is an alias) | `grok` |
 |---|---|---|---|
 | Model | OpenAI's current image model | Google's Nano Banana 2 | xAI's Grok Imagine |
-| Speed | 60 to 100 s | 17 to 40 s | 32 to 46 s |
+| Speed | 60 to 100 s | 20 to 120 s | 45 to 100 s |
 | Best at | text in images, precise product fidelity | fast drafts, likeness from references, photoreal | bold stylized looks, a third opinion |
 | Sizes | 1024x1024, 1536x1024, 1024x1536 exact; near shapes resized | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 |
 | References | any number | up to 3 (extra ones dropped) | yes (image edit; the first photo is padded to the asked shape so the scene paints wide) |
