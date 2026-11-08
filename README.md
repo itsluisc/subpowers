@@ -234,6 +234,8 @@ subpowers remote my-vps status JOB_ID
 subpowers remote my-vps fetch JOB_ID /absolute/local/banana.png
 ```
 
+If the painter has no Pillow and no sips, it keeps its own file (often `image.jpg`) and prints that path. `status` records it, and `fetch` copies that file. When the local path's extension does not match, `fetch` writes the real extension and prints the path it wrote.
+
 Reconnect to the same job after a disconnect; don't resubmit an unknown outcome.
 Jobs are kept in `~/.subpowers/jobs/` on the VPS with status, logs, image and
 provenance. They are not automatically deleted or backed up. Media upload to an

@@ -19,10 +19,31 @@ import subprocess
 import sys
 import uuid
 
-RUNNER = '''import hashlib,json,os,pathlib,subprocess,sys,time
+RUNNER = '''import hashlib,json,os,pathlib,subprocess,sys
 p=pathlib.Path(sys.argv[1]); j=json.loads((p/'input.json').read_text()); out=p/'image.png'
 def state(value,**extra):
  t=p/'status.tmp'; t.write_text(json.dumps(dict(job_id=p.name,state=value,**extra))); t.replace(p/'status.json')
+def delivered_file(requested, log_path):
+ text=log_path.read_text(errors='replace') if log_path.is_file() else ''
+ lines=[ln.strip() for ln in text.splitlines() if ln.strip()]
+ cands=[]
+ if lines: cands.append(pathlib.Path(lines[-1]))
+ cands.append(requested)
+ stem=requested.with_suffix('')
+ for ext in ('.png','.jpg','.jpeg','.webp'): cands.append(pathlib.Path(str(stem)+ext))
+ root=p.resolve(); seen=set(); allowed={'image.png','image.jpg','image.jpeg','image.webp'}
+ for c in cands:
+  if not c.is_absolute(): c=p/c
+  if str(c) in seen: continue
+  seen.add(str(c))
+  try:
+   resolved=c.resolve()
+   resolved.relative_to(root)
+   if resolved.name not in allowed: continue
+   if resolved.is_file() and resolved.stat().st_size>40: return resolved
+  except (OSError, ValueError):
+   continue
+ return None
 state('running')
 env=dict(os.environ); env['PATH']=str(pathlib.Path.home()/'.local/bin')+':'+env.get('PATH','')
 env['HOME']=str(pathlib.Path.home())
@@ -31,9 +52,9 @@ for k,v in j.get('env',{}).items(): env[k]=v
 with (p/'stdout.log').open('w') as o,(p/'stderr.log').open('w') as e:
  try:
   r=subprocess.run([j['door'],'image',j['prompt'],str(out),'--painter',j['painter']],env=env,stdout=o,stderr=e,timeout=900)
-  ok=r.returncode==0 and out.is_file() and out.stat().st_size>40
-  state('delivered' if ok else 'failed',exit_code=r.returncode,output=str(out) if ok else None,
-        sha256=hashlib.sha256(out.read_bytes()).hexdigest() if ok else None)
+  got=delivered_file(out, p/'stdout.log') if r.returncode==0 else None
+  state('delivered' if got else 'failed',exit_code=r.returncode,output=str(got) if got else None,
+        sha256=hashlib.sha256(got.read_bytes()).hexdigest() if got else None)
  except Exception as ex: state('outcome_unknown',error=type(ex).__name__)
 '''
 
@@ -61,6 +82,42 @@ if j['state'] in ('launching','running'):
  if subprocess.run(cmd,capture_output=True).returncode: j['state']='outcome_unknown'
 print(json.dumps(j))
 '''
+
+
+def remote_image_path(remote, job_id):
+    """Accept only image.png/jpg/jpeg/webp inside this job directory."""
+    if not isinstance(remote, str) or not isinstance(job_id, str):
+        raise RuntimeError('invalid remote delivery path')
+    if any(part == '..' for part in remote.split('/')):
+        raise RuntimeError('invalid remote delivery path')
+    match = re.fullmatch(r'/[A-Za-z0-9_./-]+/' + re.escape(job_id) + r'/image\.(png|jpg|jpeg|webp)', remote)
+    if not match:
+        raise RuntimeError('invalid remote delivery path')
+    return 'image.' + match.group(1), match.group(1)
+
+
+def fetch_destination(requested, ext):
+    requested = Path(requested)
+    suffix = requested.suffix.lower()
+    if suffix not in ('.png', '.jpg', '.jpeg', '.webp'):
+        raise RuntimeError('fetch output must end in .png, .jpg, .jpeg, or .webp')
+    want = '.jpg' if ext == 'jpeg' else '.' + ext
+    normal = '.jpg' if suffix == '.jpeg' else suffix
+    if normal != want:
+        return requested.with_suffix(want)
+    return requested
+
+
+def image_bytes_match(data, ext):
+    if len(data) < 40:
+        return False
+    if ext == 'png':
+        return data.startswith(b'\x89PNG\r\n\x1a\n')
+    if ext in ('jpg', 'jpeg'):
+        return data.startswith(b'\xff\xd8\xff')
+    if ext == 'webp':
+        return len(data) >= 12 and data.startswith(b'RIFF') and data[8:12] == b'WEBP'
+    return False
 
 
 def ssh(host, code, args=(), payload=None):
@@ -98,22 +155,20 @@ def main():
         print(json.dumps(status)); return
     if status.get('state') != 'delivered':
         raise RuntimeError('job not delivered: ' + status.get('state', 'unknown') + '; never resubmit an unknown outcome')
-    out = a.out.expanduser().absolute()
-    if out.suffix.lower() != '.png':
-        raise RuntimeError('fetch output must end in .png')
-    out.parent.mkdir(parents=True, exist_ok=True)
     remote = status['output']
-    if not re.fullmatch(r'/[A-Za-z0-9_./-]+', remote) or not remote.endswith('/' + a.job_id + '/image.png'):
-        raise RuntimeError('invalid remote delivery path')
+    _name, ext = remote_image_path(remote, a.job_id)
+    out = fetch_destination(a.out.expanduser().absolute(), ext)
+    out.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(['scp','-q',a.host+':'+remote,str(out)],check=True,timeout=60)
     data = out.read_bytes()
     digest = hashlib.sha256(data).hexdigest()
-    if not data.startswith(b'\x89PNG\r\n\x1a\n') or len(data) < 40:
-        raise RuntimeError('fetched output is not a PNG; retained for inspection, not delivered')
+    if not image_bytes_match(data, ext):
+        raise RuntimeError('fetched output is not a %s; retained for inspection, not delivered' % ext)
     if status.get('sha256') and digest != status['sha256']:
-        raise RuntimeError('fetched PNG does not match the remote delivery digest')
+        raise RuntimeError('fetched image does not match the remote delivery digest')
     # Provenance stays beside the fetched image. Missing receipt is a delivery failure.
-    subprocess.run(['scp','-q',a.host+':'+remote[:-4]+'.prompt.txt',str(out.with_suffix('.prompt.txt'))],check=True,timeout=30)
+    receipt = str(Path(remote).with_suffix('.prompt.txt'))
+    subprocess.run(['scp','-q',a.host+':'+receipt,str(out.with_suffix('.prompt.txt'))],check=True,timeout=30)
     status['local_output'] = str(out)
     status['local_sha256'] = digest
     status['digest_match'] = digest == status.get('sha256') if status.get('sha256') else None

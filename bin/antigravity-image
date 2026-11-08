@@ -171,7 +171,8 @@ chmod 700 "$shim/open"
 log="$root/agy.jsonl"; err="$root/agy.err"
 # Failure logs remain useful, copied credentials do not. Never retain the token
 # in kept troubleshooting directories, including failed model-list probes.
-trap 'rm -f "$profile/antigravity-cli/antigravity-oauth-token"' EXIT
+scrub_oauth() { rm -f "$profile/antigravity-cli/antigravity-oauth-token"; }
+trap scrub_oauth EXIT
 
 agy_env() {
   env -u GEMINI_API_KEY -u GOOGLE_API_KEY -u GOOGLE_GENAI_USE_VERTEXAI \
@@ -363,7 +364,16 @@ if [[ -z "$img" || ! -f "$img" ]]; then
 fi
 # The plan has paid for this image: any failure from here on is a delivery failure,
 # exit 5, so bin/subpowers never paints it again on another plan.
-delivery_failed() { local rc=$?; (( rc == 0 )) && return 0; echo "$me: painted but not delivered (exit $rc); the painted file: $img" >&2; exit 5; }
+# Replacing the EXIT trap must not drop credential cleanup. The token is also
+# removed before this trap is installed, so a kept workdir never retains it.
+delivery_failed() {
+  local rc=$?
+  scrub_oauth
+  (( rc == 0 )) && return 0
+  echo "$me: painted but not delivered (exit $rc); the painted file: $img" >&2
+  exit 5
+}
+scrub_oauth
 trap delivery_failed EXIT
 if [[ "$calls" == "0" ]]; then
   echo "$me: WARNING no generate_image call in the transcript; this file may not come from the image model." >&2

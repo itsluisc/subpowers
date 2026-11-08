@@ -111,6 +111,7 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 
 ## Change Log
 
+- 2026-11-08: `delivery_failed` still deletes the copied OAuth token when the workdir is kept or delivery fails. Remote jobs use the painter's printed path, so a delivered `image.jpg` is not marked failed. The cliproxy fallback derives aspect from `--size` when `--aspect` is omitted.
 - 2026-10-07: AGY 1.3.1 may advertise `generate_image` while its executor cannot run it. Added explicit `AGY_IMAGE_TRANSPORT=cliproxy` fallback using an existing loopback Antigravity OAuth proxy, never Google API keys. Default remains native; unofficial proxy access can violate provider terms. `AGY_PROXY_IMAGE_MODEL` must be exposed by that provider; default verified ID is `gemini-3.1-flash-image` (Nano Banana 2), not a guessed 2.1 alias. Higgsfield lists Nano Banana 2.1 under its own ID `nano_banana_2_1`; that does not establish the AGY ID. See README for setup and limitations.
 - 2026-10-02 (Claude, for Luis): two speed fixes in `bin/subpowers`, found by timing every painter alone.
   1. A login probe that TIMES OUT (exit 124 or 142) is no longer read as "logged out" and cached OFF for 10 minutes. On a busy Mac that skipped Nano Banana ("not connected") while it was logged in. Timeout now means assume connected; the real call tells the truth.

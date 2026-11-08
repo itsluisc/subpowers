@@ -67,10 +67,18 @@ class Tests(unittest.TestCase):
         self.thread.join()
         self.tmp.cleanup()
 
-    def run_image(self):
-        r = subprocess.run(["python3", str(BIN), "a banana", str(self.out)], env=self.env, capture_output=True, text=True, timeout=10)
+    def run_image(self, *extra):
+        r = subprocess.run(["python3", str(BIN), "a banana", str(self.out), *extra], env=self.env, capture_output=True, text=True, timeout=10)
         self.assertNotIn("secret-never-print", r.stdout + r.stderr)
         return r
+
+    def test_size_derives_aspect(self):
+        self.assertEqual(self.run_image("--size", "1536x1024").returncode, 0)
+        self.assertEqual(self.posts[0]["image_config"]["aspect_ratio"], "3:2")
+
+    def test_explicit_aspect_overrides_size(self):
+        self.assertEqual(self.run_image("--size", "1536x1024", "--aspect", "9:16").returncode, 0)
+        self.assertEqual(self.posts[0]["image_config"]["aspect_ratio"], "9:16")
 
     def test_success_receipt(self):
         self.assertEqual(self.run_image().returncode, 0)

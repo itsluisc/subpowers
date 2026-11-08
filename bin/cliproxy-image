@@ -8,6 +8,7 @@ import argparse
 import base64
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -21,6 +22,17 @@ import urllib.request
 
 class Failure(Exception):
     pass
+
+
+ASPECTS = ("1:1", "2:3", "3:2", "3:4", "4:3", "9:16", "16:9")
+
+
+def nearest_aspect(width, height):
+    """Same log-distance rule as bin/antigravity-image when --size has no --aspect."""
+    def ratio(spec):
+        left, right = spec.split(":")
+        return int(left) / int(right)
+    return min(ASPECTS, key=lambda spec: abs(math.log((width / height) / ratio(spec))))
 
 
 def loopback_url(url):
@@ -69,20 +81,26 @@ def main():
     ap.add_argument("prompt")
     ap.add_argument("out", type=Path)
     ap.add_argument("--size", default="")
-    ap.add_argument("--aspect", default="1:1")
+    ap.add_argument("--aspect", default="")
     ap.add_argument("--ref", action="append", default=[])
     ap.add_argument("--driver", default="", help="ignored: no chat driver on this transport")
     a = ap.parse_args()
     out = a.out.expanduser().absolute()
     if not a.prompt or out.suffix.lower() not in (".png", ".jpg", ".jpeg"):
         raise Failure("nonempty prompt and .png/.jpg output required")
+    w = h = 0
     if a.size:
         try:
-            w, h = map(int, a.size.split("x"))
+            w, h = (int(x) for x in a.size.split("x"))
             if min(w, h) <= 0 or max(w, h) > 16384:
                 raise ValueError()
         except ValueError:
             raise Failure("invalid --size")
+    aspect = a.aspect
+    if aspect and aspect not in ASPECTS:
+        raise Failure("aspect must be one of " + " ".join(ASPECTS))
+    if not aspect:
+        aspect = nearest_aspect(w, h) if a.size else "1:1"
     origin = loopback_url(os.environ.get("AGY_IMAGE_PROXY_URL", "http://127.0.0.1:8317"))
     keyfile = Path(os.environ.get("AGY_IMAGE_PROXY_KEY_FILE", "~/.cli-proxy-api/.local-key")).expanduser()
     try:
@@ -138,7 +156,7 @@ def main():
     atomic(receipt, json.dumps(state, indent=2).encode())
     t0 = time.monotonic()
     result = request("/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": content}],
-                                             "stream": False, "image_config": {"aspect_ratio": a.aspect}})
+                                             "stream": False, "image_config": {"aspect_ratio": aspect}})
     message = result.get("choices", [{}])[0].get("message", {})
     images = message.get("images", [])
     if len(images) != 1:

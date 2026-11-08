@@ -69,6 +69,7 @@ img() {  # img PATH FORMAT WxH
 f, w, h = fakeimg.dims(sys.argv[2]); print("%s %dx%d" % (f, w, h))' "$stubs" "$1" 2>/dev/null || echo missing)"
   [[ "$got" == "$2 $3" ]] || { echo "        $(basename "$1") is $got"; return 1; }
 }
+no_oauth_copy() { [[ -z "$(find "$1" -name antigravity-oauth-token -print -quit 2>/dev/null)" ]]; }
 magic() {  # magic PATH HEX: the file starts with these bytes
   local got; got="$(python3 -c 'import sys; print(open(sys.argv[1], "rb").read(3).hex())' "$1" 2>/dev/null || echo missing)"
   [[ "$got" == "$2" ]] || { echo "        $(basename "$1") starts with $got"; return 1; }
@@ -124,6 +125,25 @@ else
 fi
 check "receipt" test -f "$C/out/mug.prompt.txt"
 check "one paint" paints 1 agy
+
+newcase "antigravity: a kept workdir does not retain the copied oauth token"
+mkdir -p "$C/home/.gemini/antigravity-cli"
+printf 'secret-oauth-token\n' >"$C/home/.gemini/antigravity-cli/antigravity-oauth-token"
+chmod 600 "$C/home/.gemini/antigravity-cli/antigravity-oauth-token"
+run AGY_IMAGE_KEEP_WORKDIR=1 bash "$bin/antigravity-image" "a red mug" "$C/out/mug.png" --size 1024x1024
+check "exit 0" exits 0
+kept="$(sed -n 's/.*workdir kept: //p' "$C/stderr" | tail -n 1)"
+check "names the kept workdir" test -d "$kept"
+check "copied oauth token is gone" no_oauth_copy "$kept"
+check "the login token in HOME stays" test -f "$C/home/.gemini/antigravity-cli/antigravity-oauth-token"
+
+newcase "antigravity: delivery failure still deletes the copied oauth token"
+mkdir -p "$C/home/.gemini/antigravity-cli" "$C/out/x.prompt.txt"
+printf 'secret-oauth-token\n' >"$C/home/.gemini/antigravity-cli/antigravity-oauth-token"
+run bash "$bin/antigravity-image" "a red mug" "$C/out/x.png"
+check "exit 5" exits 5
+check "copied oauth token is gone" no_oauth_copy "$C/tmp"
+check "the login token in HOME stays" test -f "$C/home/.gemini/antigravity-cli/antigravity-oauth-token"
 
 newcase "antigravity: 16:9 jpg cropped and resized to 1600x900"
 run bash "$bin/antigravity-image" "a harbor at dawn" "$C/out/harbor.jpg" --size 1600x900
