@@ -84,7 +84,7 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 
 ## Always the best model
 
-- Painters are chosen server-side by OpenAI, Google and xAI on every call, so they cannot go stale. Grok asks for xAI's quality Imagine model and falls back to xAI's default when a plan lacks it (the receipt names which one painted).
+- Server-side selection is not proof of the newest model. Receipts distinguish requested and observed image IDs. Do not rename an old result after a product announcement. Grok asks for xAI's quality Imagine model and falls back to xAI's default when a plan lacks it.
 - Helper models run at high effort (they write the prompt the painter sees). ChatGPT: codex's own per-account model list, newest first; codex updates itself daily (`SUBPOWERS_NO_AUTOUPDATE=1` opts out). Antigravity: the newest Gemini Flash at High. Grok: the newest non-fast model in `grok models`.
 - The user's own picks live in `~/.subpowers/config` (`KEY=value`: `CHATGPT_IMAGE_DRIVERS`, `CHATGPT_IMAGE_EFFORT`, `AGY_IMAGE_EFFORT`, `GROK_IMAGE_EFFORT`, `GROK_IMAGE_MODEL`). Respect them; don't override them with flags unless the user asks.
 
@@ -98,6 +98,7 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 | `grok is not logged in` / exit 4 `SuperGrok feature` | `grok login` with a grok.com account that has SuperGrok |
 | `dry (quota)` | that plan's usage is spent; `auto` already moves to the next painter |
 | `no image_gen output` / `no generate_image output` / `never called image_gen` | the helper skipped the tool; rerun, or reword a prompt that reads like a policy refusal |
+| native AGY 1.3.1 `unknown tool: generate_image` | permissions cannot register the missing executor; the full official Linux app 2.21.0 was verified as a native alternative, but desktop auth is separate and its observed painter was Nano Banana 2, not 2.1 |
 | `WARNING ... aspect` / `UPSCALED` | not an error: the receipt says exactly what was cropped or enlarged |
 | `no reference set 'NAME'` | `subpowers refs add NAME photo1.jpg ...` |
 
@@ -110,6 +111,8 @@ subpowers stopmotion "<concept>" /abs/out.mp4 [--frames 8] [--fps 6] [--painter 
 
 ## Change Log
 
+- 2026-11-08: `delivery_failed` still deletes the copied OAuth token when the workdir is kept or delivery fails. Remote jobs use the painter's printed path, so a delivered `image.jpg` is not marked failed. The cliproxy fallback derives aspect from `--size` when `--aspect` is omitted.
+- 2026-10-07: AGY 1.3.1 may advertise `generate_image` while its executor cannot run it. Added explicit `AGY_IMAGE_TRANSPORT=cliproxy` fallback using an existing loopback Antigravity OAuth proxy, never Google API keys. Default remains native; unofficial proxy access can violate provider terms. `AGY_PROXY_IMAGE_MODEL` must be exposed by that provider; default verified ID is `gemini-3.1-flash-image` (Nano Banana 2), not a guessed 2.1 alias. Higgsfield lists Nano Banana 2.1 under its own ID `nano_banana_2_1`; that does not establish the AGY ID. See README for setup and limitations.
 - 2026-10-02 (Claude, for Luis): two speed fixes in `bin/subpowers`, found by timing every painter alone.
   1. A login probe that TIMES OUT (exit 124 or 142) is no longer read as "logged out" and cached OFF for 10 minutes. On a busy Mac that skipped Nano Banana ("not connected") while it was logged in. Timeout now means assume connected; the real call tells the truth.
   2. `--refs` and `--ref` pictures are shrunk once to 1280 px JPEG and cached in `~/.cache/subpowers/refs-small/`. A 4096 px phone photo kept Nano Banana busy for over 400 s with three references; shrunk, the same job takes 25 s. Measured with the luis shelf: Nano Banana 25 s, Grok 43 s, ChatGPT 60 s.
