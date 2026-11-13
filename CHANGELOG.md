@@ -2,6 +2,25 @@
 
 One line per change, with the why. Newest first.
 
+## [0.4.0] - 2026-11-13
+
+### Added
+- `--painter higgsfield` (`bin/higgsfield-image`): the official `higgsfield` CLI on your Higgsfield plan, browser sign-in, no API key. Default model Nano Banana 2.1 (`nano_banana_2_1`); `HIGGSFIELD_IMAGE_MODEL` picks any image job id (`gpt_image_2_6`, `grok_image_2_0`). It is the one painter that costs per image, so it prices the job first, refuses above `HIGGSFIELD_IMAGE_MAX_CREDITS` (default 2), writes the estimate and the balance before and after into the receipt, flags a job that reports a different model, and is never picked by `auto` or `council`.
+- HyperFrames: `--into PROJECT` for image, video and stop-motion, `subpowers hf add|remove|skill`, and `subpowers hf skill --project P --attach`, which also attaches the chat skill to that project in the HyperFrames app (`chat-skills.json`, only adds, keeps a .bak).
+- `--match-set VIDEO[@SECONDS]` and `bin/set-plate`: paint on the set of your own footage, with the people removed from the plate.
+- `bin/cliproxy-image`: an explicit, opt-in Antigravity fallback through a loopback OAuth proxy (never a Google API key).
+- `subpowers doctor` reports Higgsfield (opt-in) and which Grok image and video models are requested.
+
+### Changed
+- Grok images ask for `grok-imagine-image-2.0`. xAI retired `grok-imagine-image-quality` on 2026-11-02 (that id quietly served 2.0 at low quality).
+- Grok video receipts name `grok-imagine-video-1.5`, the model grok 1.0.77 asks for (still 480p or 720p through the CLI).
+- Antigravity paints through agy's built-in image-generator subagent (agy 1.2.16+ moved `generate_image` there); the receipt reads the painter id back from the job.
+- The HyperFrames chat skill says it works on any model the app chat runs on, and that the app's own generation (Nano Banana 2.1 since app 0.9.38) spends HeyGen credits.
+
+### Checked, no change needed
+- codex 0.169 turns off project config and MCP servers for `codex exec` in untrusted folders. The ChatGPT painter already passes its own isolation (`mcp_servers={}`, `project_doc_max_bytes=0`) on the command line, and a live run on 0.169.0 painted normally.
+- `hyperframes snapshot --at` adds an end frame by default; `--into --snapshot` already passes `--no-end`.
+
 ## [0.3.2] - 2026-09-26
 
 ### Added

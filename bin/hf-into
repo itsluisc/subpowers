@@ -1,0 +1,654 @@
+#!/usr/bin/env python3
+"""hf-into: put a subpowers image, video or stop-motion clip into a HyperFrames project as ONE editable layer.
+
+Usage (normally through `subpowers image|video|stopmotion ... --into PROJECT`, or `subpowers hf ...`):
+  hf-into plan    --project P --kind image|video|stopmotion --ext png [--name N] [--prompt T]
+                  [--at S] [--duration S] [--place lower|full|box:x,y,w,h]
+                  reserves PROJECT/assets/generated/<slug>/ and prints "<media path>\t<size>\t<aspect>"
+  hf-into add     --project P --file F [--name N] [--prompt T] [--at S] [--duration S] [--place P]
+                  [--keep-audio] [--snapshot]
+                  mounts F (already in a reserved folder, or copied in with its receipt) as one layer
+  hf-into abandon --file F        drops a reserved folder that never got its media
+  hf-into remove  --project P --layer gen-<slug>   unmounts one subpowers layer (the media stays)
+  hf-into skill   --project P [--attach]   copies the in-app skill to P/.claude/skills/subpowers-hyperframes/;
+                                  --attach also adds it to the app chat's skills for P (chat-skills.json)
+
+The layer is written the way HyperFrames scenes are written (hyperframes docs compositions):
+  * compositions/gen-<slug>.html: a scene file, <template> inside, its own paused timeline. The
+    frame's hidden starting state (opacity 0) is in the scene CSS, so it never flashes before it
+    fades in. The media is the timed clip; the untimed frame around it is what animates.
+  * one host <div id="gen-<slug>" data-composition-src=...> in index.html's #root, between
+    <!-- subpowers:begin/end gen-<slug> --> markers, on its own graphics lane.
+Nothing else in index.html changes. An existing asset, scene or layer is never overwritten: a
+taken name gets -2, -3, ... `hyperframes lint` runs before and after; a new lint error puts
+index.html back exactly as it was and removes the scene file (the painted media is kept).
+
+Placement:
+  lower  (default) the zone under the caption rail, inside the safe box (panels below captions,
+         never on faces). The media keeps its shape, with rounded corners and a soft shadow.
+  full   the whole frame (a cutaway over the speaker), under captions and titles.
+  box:x,y,w,h  exact canvas pixels.
+Generated video and stop-motion layers are muted (the speaker's voice is the soundtrack); pass
+--keep-audio to keep the clip's own sound.
+"""
+from __future__ import annotations
+
+import argparse
+import hashlib
+import html
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+ME = "hf-into"
+SCHEMA = "subpowers-hf-layer@1"
+IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".avif"}
+VIDEO_EXT = {".mp4", ".mov", ".m4v", ".webm"}
+DEFAULT_IMAGE_S = 4.0
+HOUSE_SAFE = Path.home() / "Desktop/_Code/agentic-cuts/data/safe_zone.json"
+SKILL_SRC = Path(__file__).resolve().parent.parent / "hyperframes" / "subpowers-hyperframes" / "SKILL.md"
+
+
+class Refused(Exception):
+    pass
+
+
+def say(msg: str) -> None:
+    print(f"{ME}: {msg}", file=sys.stderr)
+
+
+# ---- the project -----------------------------------------------------------------------------
+
+class Project:
+    def __init__(self, path: str):
+        self.dir = Path(path).expanduser().resolve()
+        self.index = self.dir / "index.html"
+        if not self.dir.is_dir():
+            raise Refused(f"not a folder: {self.dir}")
+        if not self.index.is_file():
+            raise Refused(f"not a HyperFrames project: {self.index} is missing (refusing; nothing was painted)")
+        self.doc = self.index.read_text(encoding="utf-8")
+        m = re.search(r'<div\b[^>]*(?<![\w-])id="root"[^>]*>', self.doc)
+        if not m:
+            raise Refused(f'{self.index} has no <div id="root"> composition')
+        self.root_tag = m.group(0)
+        self.root_open_end = m.end()
+
+        def attr(k, default=None):
+            a = re.search(rf'\b{k}="([^"]*)"', self.root_tag)
+            return a.group(1) if a else default
+
+        try:
+            self.duration = float(attr("data-duration"))
+        except (TypeError, ValueError):
+            raise Refused('#root has no numeric data-duration') from None
+        self.w = int(float(attr("data-width", "1080")))
+        self.h = int(float(attr("data-height", "1920")))
+
+    # structure of #root: where its children start and end, at depth 1
+    def root_layout(self):
+        """(position after the last top-level <video>/<audio>, position of #root's closing </div>)."""
+        depth, last_media, i = 1, None, self.root_open_end
+        for t in re.finditer(r"<(/?)(div|video|audio)\b[^>]*>", self.doc[self.root_open_end:]):
+            closing, tag = t.group(1) == "/", t.group(2)
+            pos = self.root_open_end + t.start()
+            if tag == "div":
+                if closing:
+                    depth -= 1
+                    if depth == 0:
+                        return last_media, pos
+                elif not t.group(0).endswith("/>"):
+                    depth += 1
+            elif closing and depth == 1:
+                last_media = self.root_open_end + t.end()
+        raise Refused("could not find where #root closes in index.html")
+
+    def ids(self) -> set[str]:
+        return set(re.findall(r'(?<![\w-])id="([^"]+)"', self.doc))
+
+    def max_track(self) -> int:
+        return max([int(x) for x in re.findall(r'data-track-index="(\d+)"', self.doc)] or [0])
+
+    def max_z(self) -> int:
+        return max([int(x) for x in re.findall(r"z-index:\s*(\d+)", self.doc[self.root_open_end:])] or [0])
+
+    def caption_rail(self):
+        """(rail centre y, font px) of the door's captions, or None."""
+        lj = self.dir / "layers.json"
+        if lj.is_file():
+            try:
+                band = (json.loads(lj.read_text()).get("caption_band") or {})
+                if band.get("centre_y"):
+                    return float(band["centre_y"]), float(band.get("font_px") or 44)
+            except (OSError, ValueError):
+                pass
+        m = re.search(r'class="[^"]*\bcaption\b[^"]*"[^>]*style="[^"]*top:([\d.]+)px[^"]*font-size:([\d.]+)px', self.doc)
+        if m:
+            return float(m.group(1)), float(m.group(2))
+        return None
+
+    def safe_box(self):
+        x0, y0, x1, y1 = 49, 115, 1031, 1543                    # 1080x1920 house safe zone
+        if self.w == 1080 and self.h == 1920 and HOUSE_SAFE.is_file():
+            try:
+                x0, y0, x1, y1 = json.loads(HOUSE_SAFE.read_text())["box_px"]
+            except (OSError, ValueError, KeyError):
+                pass
+        if self.h >= self.w:
+            sx, sy = self.w / 1080, self.h / 1920
+            return (round(x0 * sx), round(y0 * sy), round(x1 * sx), round(y1 * sy))
+        mx, my = round(self.w * 0.05), round(self.h * 0.05)        # landscape: the 90% action-safe box
+        return (mx, my, self.w - mx, self.h - my)
+
+    def timed_panels(self):
+        out = []
+        for t in re.finditer(r"<div\b[^>]*>", self.doc[self.root_open_end:]):
+            tag = t.group(0)
+            if 'data-role="panel"' not in tag and "overlay" not in tag and "data-composition-src" not in tag:
+                continue
+            i = re.search(r'(?<![\w-])id="([^"]+)"', tag)
+            s = re.search(r'data-start="([\d.]+)"', tag)
+            d = re.search(r'data-duration="([\d.]+)"', tag)
+            if i and s and d:
+                out.append((i.group(1), float(s.group(1)), float(s.group(1)) + float(d.group(1))))
+        return out
+
+
+# ---- helpers -----------------------------------------------------------------------------------
+
+def slugify(text: str) -> str:
+    s = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    s = "-".join(s.split("-")[:6])[:40].strip("-")
+    return s or "generated"
+
+
+def sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def hf_cli() -> str:
+    exe = os.environ.get("SUBPOWERS_HYPERFRAMES") or shutil.which("hyperframes")
+    if not exe:
+        raise Refused("the hyperframes CLI is not on PATH (npm install -g hyperframes); it is needed to lint the layer")
+    return exe
+
+
+def lint(project: Path) -> dict:
+    try:
+        r = subprocess.run([hf_cli(), "lint", str(project), "--json"], capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        raise Refused("hyperframes lint timed out after 180 s") from None
+    try:
+        j = json.loads(r.stdout[r.stdout.index("{"):])
+    except ValueError:
+        raise Refused(f"hyperframes lint gave no JSON (exit {r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}") from None
+    errs = [f for f in j.get("findings", []) if f.get("severity") == "error"]
+    return {"errors": int(j.get("errorCount", len(errs))), "warnings": int(j.get("warningCount", 0)),
+            "error_findings": [{"code": f.get("code"), "message": f.get("message")} for f in errs]}
+
+
+def kind_of(path: Path, given: str | None) -> str:
+    if given in ("image", "video"):
+        return given
+    if given == "stopmotion":
+        return "video"
+    ext = path.suffix.lower()
+    if ext in IMAGE_EXT:
+        return "image"
+    if ext in VIDEO_EXT:
+        return "video"
+    raise Refused(f"cannot tell what {path.name} is (an image: {sorted(IMAGE_EXT)}; a video: {sorted(VIDEO_EXT)})")
+
+
+def media_info(path: Path, kind: str) -> dict:
+    """width, height, and for video the duration and whether it has a sound track."""
+    if kind == "image":
+        try:
+            from PIL import Image
+            with Image.open(path) as im:
+                return {"w": im.width, "h": im.height}
+        except Exception:
+            pass
+        try:
+            out = subprocess.run(["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+                                 capture_output=True, text=True, timeout=30).stdout
+            w = int(re.search(r"pixelWidth:\s*(\d+)", out).group(1))
+            h = int(re.search(r"pixelHeight:\s*(\d+)", out).group(1))
+            return {"w": w, "h": h}
+        except Exception:
+            raise Refused(f"cannot read the size of {path} (install Pillow: python3 -m pip install --user pillow)") from None
+    exe = shutil.which("ffprobe")
+    if not exe:
+        raise Refused("ffprobe is needed to read the video's size and length (brew install ffmpeg)")
+    r = subprocess.run([exe, "-v", "error", "-show_entries", "stream=codec_type,width,height:format=duration",
+                        "-of", "json", str(path)], capture_output=True, text=True, timeout=60)
+    try:
+        j = json.loads(r.stdout)
+        v = next(s for s in j["streams"] if s.get("codec_type") == "video")
+        return {"w": int(v["width"]), "h": int(v["height"]), "duration": float(j["format"]["duration"]),
+                "has_audio": any(s.get("codec_type") == "audio" for s in j["streams"])}
+    except Exception:
+        raise Refused(f"ffprobe could not read {path}: {(r.stderr or '').strip()[-200:]}") from None
+
+
+def parse_place(place: str | None) -> tuple[str, tuple | None]:
+    place = (place or "lower").strip()
+    if place in ("lower", "full"):
+        return place, None
+    m = re.fullmatch(r"box:(\d+),(\d+),(\d+),(\d+)", place)
+    if m:
+        return "box", tuple(int(x) for x in m.groups())
+    raise Refused(f"--place is lower, full or box:x,y,w,h (got {place!r})")
+
+
+def lower_zone(p: Project):
+    sx0, sy0, sx1, sy1 = p.safe_box()
+    rail = p.caption_rail()
+    top = rail[0] + 1.25 * rail[1] + 16 if rail else p.h * 0.58
+    top = max(top, sy0)
+    margin = max(sx0, round(p.w * 0.083))
+    if sy1 - top < p.h * 0.12:
+        raise Refused(f"no room under the caption rail (zone {top:.0f}..{sy1}); use --place full or box:x,y,w,h")
+    return (margin, round(top), p.w - margin, sy1)
+
+
+def fit(zone, mw: int, mh: int):
+    zx0, zy0, zx1, zy1 = zone
+    zw, zh = zx1 - zx0, zy1 - zy0
+    s = min(zw / mw, zh / mh)
+    w, h = round(mw * s), round(mh * s)
+    return (zx0 + (zw - w) // 2, zy0, w, h)
+
+
+def suggested_shape(place: str, p: Project):
+    """The --size and --aspect a painter should use for this placement."""
+    portrait = p.h >= p.w
+    if place == "full":
+        return (f"{p.w}x{p.h}", "9:16" if portrait else "16:9")
+    return ("1920x1080", "16:9")
+
+
+def reserve(p: Project, name: str) -> tuple[str, Path]:
+    base = slugify(name)
+    gen = p.dir / "assets" / "generated"
+    ids = p.ids()
+    n = 1
+    while True:
+        slug = base if n == 1 else f"{base}-{n}"
+        d = gen / slug
+        if not d.exists() and f"gen-{slug}" not in ids and not (p.dir / "compositions" / f"gen-{slug}.html").exists():
+            try:
+                d.mkdir(parents=True)
+                return slug, d
+            except FileExistsError:
+                pass
+        n += 1
+
+
+def times(p: Project, at: float | None, duration: float | None, media_s: float | None, kind: str):
+    a = 0.0 if at is None else float(at)
+    if a < 0 or a >= p.duration:
+        raise Refused(f"--at {a:g}s is outside the video (0 to {p.duration:g}s)")
+    notes = []
+    if at is None:
+        notes.append("placed at 0.00 s (pass --at SECONDS to move it)")
+    if duration is not None:
+        d = float(duration)
+        if d <= 0:
+            raise Refused("--duration must be more than 0")
+    elif media_s:
+        d = media_s
+    else:
+        d = DEFAULT_IMAGE_S
+    if kind == "video" and media_s and d > media_s + 1e-3:
+        notes.append(f"duration {d:g}s cut to the clip's own {media_s:.2f}s")
+        d = media_s
+    if a + d > p.duration:
+        notes.append(f"duration cut to {p.duration - a:.2f}s so the layer ends with the video")
+        d = p.duration - a
+    return round(a, 3), round(d, 3), notes
+
+
+# ---- the scene and the host --------------------------------------------------------------------
+
+def scene_html(cid: str, p: Project, kind: str, src: str, box, place: str, dur: float, keep_audio: bool) -> str:
+    x, y, w, h = box
+    full = place == "full"
+    look = "" if full else "border-radius:26px;box-shadow:0 14px 36px rgba(0,0,0,.38);"
+    fade_in, fade_out = (0.15, 0.15) if full else (0.3, 0.25)
+    fade_out = min(fade_out, max(dur / 3, 0.05))
+    fade_in = min(fade_in, max(dur / 3, 0.05))
+    obj = "cover" if full else "contain"
+    if kind == "video":
+        sound = f'playsinline data-has-audio="true" data-volume="1"' if keep_audio else "muted playsinline"
+        media = (f'<video id="{cid}-media" class="clip" src="{html.escape(src)}" data-start="0" data-duration="{dur:.3f}" '
+                 f'data-media-start="0" data-track-index="1" {sound} preload="auto"></video>')
+        zoom_js = ""
+    else:
+        media = (f'<img id="{cid}-media" class="clip" src="{html.escape(src)}" data-start="0" data-duration="{dur:.3f}" '
+                 f'data-track-index="1" alt="">')
+        # a slow push-in so a still reads as footage, never as a sticker
+        zoom_js = (f'tl.fromTo("#{cid}-zoom",{{scale:1}},{{scale:1.04,duration:{dur:.3f},ease:"none",'
+                   f'immediateRender:false}},0);\n')
+    return f"""<template>
+<!-- made by subpowers (hf-into); the media and its receipt live in {html.escape(str(Path(src).parent))}/ -->
+<style>
+#root {{ position:absolute; inset:0; }}
+#{cid}-frame {{ position:absolute; left:{x}px; top:{y}px; width:{w}px; height:{h}px; opacity:0; overflow:hidden; {look} }}
+#{cid}-zoom {{ position:absolute; inset:0; }}
+#{cid}-media {{ position:absolute; left:0; top:0; width:100%; height:100%; object-fit:{obj}; }}
+</style>
+<div id="root" data-composition-id="{cid}" data-width="{p.w}" data-height="{p.h}">
+<div id="{cid}-frame"><div id="{cid}-zoom">{media}</div></div>
+</div>
+<script>
+const tl = gsap.timeline({{ paused: true }});
+tl.fromTo("#{cid}-frame",{{opacity:0,y:{0 if full else 16}}},{{opacity:1,y:0,duration:{fade_in:.3f},ease:"power2.out",immediateRender:false}},0);
+{zoom_js}tl.to("#{cid}-frame",{{opacity:0,y:{0 if full else 10},duration:{fade_out:.3f},ease:"power2.in"}},{max(dur - fade_out, 0):.3f});
+window.__timelines["{cid}"] = tl;
+</script>
+</template>
+"""
+
+
+def host_html(cid: str, p: Project, a: float, d: float, track: int, z: int) -> str:
+    return (f"<!-- subpowers:begin {cid} -->\n"
+            f'<div id="{cid}" data-composition-id="{cid}" data-composition-src="compositions/{cid}.html" '
+            f'data-start="{a:.3f}" data-duration="{d:.3f}" data-track-index="{track}" data-track-kind="graphics" '
+            f'data-width="{p.w}" data-height="{p.h}" data-subpowers="layer" style="position:absolute;inset:0;z-index:{z}"></div>\n'
+            f"<!-- subpowers:end {cid} -->\n")
+
+
+# ---- commands ------------------------------------------------------------------------------------
+
+def cmd_plan(a) -> int:
+    p = Project(a.project)
+    place, _ = parse_place(a.place)
+    if place == "lower":
+        lower_zone(p)                                   # refuse before painting when there is no room
+    times(p, a.at, a.duration, None, "image")          # refuse a time outside the video before painting
+    before = lint(p.dir)
+    slug, d = reserve(p, a.name or a.prompt or a.kind)
+    media = d / f"{slug}.{a.ext.lstrip('.')}"
+    (d / ".pending.json").write_text(json.dumps({"project": str(p.dir), "slug": slug, "kind": a.kind,
+                                                "lint_before": before, "reserved_at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}))
+    size, aspect = suggested_shape(place, p)
+    if before["errors"]:
+        say(f"note: the project already has {before['errors']} lint error(s); the layer must not add any")
+    print(f"{media}\t{size}\t{aspect}")
+    return 0
+
+
+def sidecars(f: Path):
+    """The receipt and companions subpowers writes beside an output."""
+    stem = f.with_suffix("")
+    out = [Path(str(stem) + ".prompt.txt")]
+    out += sorted(f.parent.glob(f.stem + ".original.*"))
+    out += [Path(str(stem) + ".first.png"), Path(str(stem) + ".first.prompt.txt"), Path(str(stem) + ".frames")]
+    return [x for x in out if x.exists()]
+
+
+def cmd_add(a) -> int:
+    p = Project(a.project)
+    f = Path(a.file).expanduser().resolve()
+    if not f.is_file():
+        raise Refused(f"no such file: {f}")
+    kind = kind_of(f, a.kind)
+    place, box_arg = parse_place(a.place)
+    pending = f.parent / ".pending.json"
+    gen = (p.dir / "assets" / "generated").resolve()
+    if pending.is_file() and f.parent.parent == gen:
+        meta = json.loads(pending.read_text())
+        slug, d, before = meta["slug"], f.parent, meta.get("lint_before")
+    else:
+        before = None
+        slug, d = reserve(p, a.name or a.prompt or f.stem)
+        target = d / f"{slug}{f.suffix.lower()}"
+        shutil.copy2(f, target)
+        for s in sidecars(f):
+            dst = d / (slug + s.name[len(f.stem):])
+            if s.is_dir():
+                shutil.copytree(s, dst, symlinks=True)
+            else:
+                shutil.copy2(s, dst)
+        f = target
+    if before is None:
+        before = lint(p.dir)
+    cid = f"gen-{slug}"
+    if cid in p.ids() or (p.dir / "compositions" / f"{cid}.html").exists():
+        raise Refused(f"layer {cid} already exists; refusing to overwrite it")
+
+    info = media_info(f, kind)
+    at, dur, notes = times(p, a.at, a.duration, info.get("duration"), kind)
+    if place == "full":
+        box = (0, 0, p.w, p.h)
+    elif place == "box":
+        box = box_arg
+    else:
+        box = fit(lower_zone(p), info["w"], info["h"])
+    sx0, sy0, sx1, sy1 = p.safe_box()
+    if place != "full" and not (box[0] >= sx0 and box[1] >= sy0 and box[0] + box[2] <= sx1 and box[1] + box[3] <= sy1):
+        notes.append(f"box {box} leaves the safe zone {(sx0, sy0, sx1, sy1)}")
+    for pid, s, e in p.timed_panels():
+        if s < at + dur and at < e and place == "lower":
+            notes.append(f"plays at the same time as {pid} ({s:.2f}-{e:.2f}s); check that they do not cover each other")
+
+    src = f.relative_to(p.dir).as_posix()
+    keep_audio = bool(a.keep_audio and kind == "video" and info.get("has_audio"))
+    if a.keep_audio and kind == "video" and not info.get("has_audio"):
+        notes.append("--keep-audio: the clip has no sound track; it plays muted")
+    scene = scene_html(cid, p, kind, src, box, place, dur, keep_audio)
+    last_media, root_close = p.root_layout()
+    if place == "full":
+        z = 0
+        at_pos = last_media if last_media is not None else p.root_open_end
+    else:
+        z = p.max_z() + 1
+        at_pos = root_close
+    host = host_html(cid, p, at, dur, p.max_track() + 1, z)
+    doc_before = p.doc
+    if not doc_before[:at_pos].endswith("\n"):
+        host = "\n" + host
+    doc_after = doc_before[:at_pos] + host + doc_before[at_pos:]
+
+    backup = p.dir / ".subpowers" / "backups" / f"index.before-{cid}.html"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text(doc_before, encoding="utf-8")
+    comp = p.dir / "compositions" / f"{cid}.html"
+    comp.parent.mkdir(exist_ok=True)
+    with comp.open("x", encoding="utf-8") as fh:                         # "x": never overwrite a scene
+        fh.write(scene)
+    p.index.write_text(doc_after, encoding="utf-8")
+    try:
+        after = lint(p.dir)
+    except Refused:
+        p.index.write_text(doc_before, encoding="utf-8")
+        comp.unlink()
+        raise
+    if after["errors"] > before["errors"]:
+        p.index.write_text(doc_before, encoding="utf-8")
+        comp.unlink()
+        raise Refused(f"the layer added lint errors ({before['errors']} -> {after['errors']}): "
+                      f"{after['error_findings'][:3]}; index.html is back as it was, the media stays at {f}")
+    pending.unlink(missing_ok=True)
+
+    receipt = {
+        "schema": SCHEMA, "made_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"), "door": "subpowers --into (bin/hf-into)",
+        "project": str(p.dir), "layer_id": cid, "kind": a.kind or kind, "file": src, "sha256": sha256(f),
+        "bytes": f.stat().st_size, "media": info, "start_s": at, "duration_s": dur, "place": place,
+        "box_px": list(box), "z_index": z, "track_index": p.max_track() + 1, "muted": kind == "video" and not keep_audio,
+        "scene": comp.relative_to(p.dir).as_posix(), "index_backup": backup.relative_to(p.dir).as_posix(),
+        "painter_receipt": next((s.relative_to(p.dir).as_posix() for s in sidecars(f) if s.name.endswith(".prompt.txt")), None),
+        "prompt": a.prompt, "notes": notes, "lint": {"before": before, "after": after},
+        "undo": f"subpowers hf remove --project {json.dumps(str(p.dir))} --layer {cid}",
+    }
+    if a.snapshot:
+        receipt["snapshot"] = snapshot(p.dir, d, at, dur)
+    rpath = d / f"{slug}.layer.json"
+    rpath.write_text(json.dumps(receipt, indent=1), encoding="utf-8")
+    for n in notes:
+        say(f"note: {n}")
+    say(f"layer {cid}: {kind} {at:.2f}s to {at + dur:.2f}s, {place} {box}; lint {after['errors']} errors "
+        f"({after['warnings']} warnings, {before['warnings']} before)")
+    print(f)
+    print(rpath)
+    return 0
+
+
+def snapshot(project: Path, d: Path, at: float, dur: float):
+    t = round(at + min(max(0.6, dur / 2), max(dur - 0.3, 0.05)), 3)
+    out = d / "proof"
+    try:
+        r = subprocess.run([hf_cli(), "snapshot", str(project), "--at", f"{t}", "--no-end", "--json",
+                            "--describe", "false", "-o", str(out)], capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        say("snapshot timed out after 600 s; the layer is in place")
+        return {"at_s": t, "error": "timeout"}
+    pngs = sorted(str(x) for x in out.glob("*.png"))
+    if r.returncode != 0 or not pngs:
+        say(f"snapshot failed (exit {r.returncode}): {(r.stderr or r.stdout).strip()[-300:]}")
+        return {"at_s": t, "error": (r.stderr or r.stdout).strip()[-300:]}
+    say(f"snapshot at {t}s: {pngs[0]} (look at it before you show the edit)")
+    return {"at_s": t, "png": pngs}
+
+
+def cmd_abandon(a) -> int:
+    f = Path(a.file).expanduser()
+    d = f.parent
+    pending = d / ".pending.json"
+    if not pending.is_file():
+        return 0
+    media = [x for x in d.rglob("*") if x.is_file() and x.suffix.lower() in IMAGE_EXT | VIDEO_EXT]
+    if media:
+        say(f"kept {d}: it holds {len(media)} painted file(s), never thrown away; mount one later with: "
+            f"subpowers hf add --project <project> --file <file>")
+        return 0
+    leftovers = [x for x in d.iterdir() if x.name != ".pending.json"]
+    pending.unlink()
+    if not leftovers:
+        d.rmdir()
+        return 0
+    # only logs of the failed run: moved out of assets/ (d is PROJECT/assets/generated/<slug>), never deleted
+    dst = d.parent.parent.parent / ".subpowers" / "failed" / f"{d.name}-{time.strftime('%Y%m%d-%H%M%S')}"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(d), str(dst))
+    say(f"nothing was painted; the run's logs are in {dst}")
+    return 0
+
+
+def cmd_remove(a) -> int:
+    p = Project(a.project)
+    cid = a.layer
+    if not re.fullmatch(r"gen-[a-z0-9-]+", cid):
+        raise Refused("only subpowers layers (gen-...) are removed here")
+    pat = re.compile(r"(?:<!-- subpowers:begin " + re.escape(cid) + r" -->\n?)?<div\b[^>]*(?<![\w-])id=\"" + re.escape(cid)
+                     + r"\"[^>]*\bdata-subpowers=\"layer\"[^>]*></div>\n?(?:<!-- subpowers:end " + re.escape(cid) + r" -->\n?)?")
+    doc, n = pat.subn("", p.doc, count=1)
+    if not n:
+        raise Refused(f"no subpowers layer {cid} in {p.index}")
+    backup = p.dir / ".subpowers" / "backups" / f"index.before-remove-{cid}.html"
+    backup.parent.mkdir(parents=True, exist_ok=True)
+    backup.write_text(p.doc, encoding="utf-8")
+    p.index.write_text(doc, encoding="utf-8")
+    comp = p.dir / "compositions" / f"{cid}.html"
+    if comp.exists():
+        kept = p.dir / ".subpowers" / "removed" / comp.name
+        kept.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(comp), str(kept))
+    after = lint(p.dir)
+    say(f"removed {cid}; the media stays in assets/generated/; index backup {backup}; lint {after['errors']} errors")
+    return 0 if after["errors"] == 0 else 1
+
+
+def cmd_skill(a) -> int:
+    p = Project(a.project)
+    if not SKILL_SRC.is_file():
+        raise Refused(f"skill source missing: {SKILL_SRC}")
+    dst = p.dir / ".claude" / "skills" / "subpowers-hyperframes" / "SKILL.md"
+    if dst.exists() and dst.read_bytes() != SKILL_SRC.read_bytes():
+        raise Refused(f"{dst} exists and differs; refusing to overwrite it")
+    if not dst.exists():
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(SKILL_SRC, dst)
+    print(dst)
+    if getattr(a, "attach", False):
+        attach_chat_skill(p.dir)
+    return 0
+
+
+# The HyperFrames app's chat agent (Framey, app 0.9.x) keeps the skills attached to each project in
+# chat-skills.json as {project_path: ["skill:<name>", "workflow:<name>"]} (read from the app's data,
+# 2026-11-13; not a documented format). --attach only ADDS our entry, keeps a .bak first, and never
+# removes or reorders anything the person attached.
+CHAT_SKILLS = Path(os.environ.get("HYPERFRAMES_CHAT_SKILLS",
+                                  str(Path.home() / "Library/Application Support/HyperFrames/chat-skills.json")))
+
+
+def attach_chat_skill(project: Path) -> None:
+    entry = "skill:subpowers-hyperframes"
+    data = {}
+    if CHAT_SKILLS.is_file():
+        try:
+            data = json.loads(CHAT_SKILLS.read_text())
+        except ValueError:
+            raise Refused(f"{CHAT_SKILLS} is not valid JSON; not touching it")
+        if not isinstance(data, dict):
+            raise Refused(f"{CHAT_SKILLS} has an unexpected shape; not touching it")
+    key = str(project.resolve())
+    have = data.get(key) or []
+    if entry in have:
+        say(f"already attached in the HyperFrames app chat for {key}")
+        return
+    if CHAT_SKILLS.is_file():
+        shutil.copy2(CHAT_SKILLS, CHAT_SKILLS.with_name(CHAT_SKILLS.name + ".bak-subpowers"))
+    data[key] = list(have) + [entry]
+    CHAT_SKILLS.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CHAT_SKILLS.with_name(CHAT_SKILLS.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2) + "\n")
+    tmp.replace(CHAT_SKILLS)
+    say(f"attached {entry} to the HyperFrames app chat for {key} (reopen the project's chat; backup: {CHAT_SKILLS.name}.bak-subpowers)")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(prog=ME, description=__doc__.split("\n")[0])
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    def common(s):
+        s.add_argument("--project", required=True)
+        s.add_argument("--name", "--layer-name", dest="name")
+        s.add_argument("--prompt")
+        s.add_argument("--at", type=float)
+        s.add_argument("--duration", type=float)
+        s.add_argument("--place")
+
+    s = sub.add_parser("plan"); common(s)
+    s.add_argument("--kind", required=True, choices=("image", "video", "stopmotion"))
+    s.add_argument("--ext", required=True)
+    s = sub.add_parser("add"); common(s)
+    s.add_argument("--file", required=True)
+    s.add_argument("--kind", choices=("image", "video", "stopmotion"))
+    s.add_argument("--keep-audio", action="store_true")
+    s.add_argument("--snapshot", action="store_true")
+    s = sub.add_parser("abandon"); s.add_argument("--file", required=True)
+    s = sub.add_parser("remove"); s.add_argument("--project", required=True); s.add_argument("--layer", required=True)
+    s = sub.add_parser("skill"); s.add_argument("--project", required=True)
+    s.add_argument("--attach", action="store_true", help="also attach it in the HyperFrames app chat (chat-skills.json)")
+    a = ap.parse_args(argv)
+    try:
+        return {"plan": cmd_plan, "add": cmd_add, "abandon": cmd_abandon, "remove": cmd_remove, "skill": cmd_skill}[a.cmd](a)
+    except Refused as e:
+        say(f"refused: {e}")
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

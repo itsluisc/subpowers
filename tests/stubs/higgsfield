@@ -1,0 +1,41 @@
+#!/usr/bin/env python3
+"""Stand-in for the official Higgsfield CLI: account status, model get, generate cost, generate create --wait."""
+import json
+import os
+import sys
+import uuid
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import _stub  # noqa: E402
+import fakeimg  # noqa: E402
+
+a = [x for x in sys.argv[1:] if x not in ("--json", "--no-color")]
+_stub.log("higgsfield")
+BAL = os.path.join(os.environ.get("HOME", "/tmp"), ".stub-higgsfield-credits")
+credits = float(open(BAL).read()) if os.path.exists(BAL) else 100.0
+COST = float(os.environ.get("STUB_HF_COST", "1.5"))
+ASPECTS = ["auto", "1:1", "3:2", "2:3", "4:3", "3:4", "9:16", "16:9"]
+
+if a[:2] == ["account", "status"]:
+    if os.environ.get("STUB_HF_LOGGED_OUT"):
+        print("Error: not authenticated", file=sys.stderr); sys.exit(1)
+    print(json.dumps({"credits": credits, "subscription_plan_type": "ultimate"}))
+elif a[:2] == ["model", "get"]:
+    if a[2] not in ("nano_banana_2_1", "gpt_image_2_6"):
+        print(f"Error: unknown job type {a[2]}", file=sys.stderr); sys.exit(1)
+    print(json.dumps({"job_type": a[2], "params": [
+        {"name": "aspect_ratio", "enum": ASPECTS}, {"name": "prompt"}, {"name": "resolution", "enum": ["1k", "2k"]}]}))
+elif a[:2] == ["generate", "cost"]:
+    print(json.dumps({"credits": COST}))
+elif a[:2] == ["generate", "create"]:
+    model = a[2]; aspect = _stub.arg("--aspect_ratio") or "1:1"
+    w, h = _stub.DIMS.get(aspect, (1024, 1024))
+    jid = str(uuid.uuid4()); path = os.path.join(os.environ.get("TMPDIR", "/tmp"), f"hf_{jid}.png")
+    fakeimg.png(path, w, h)
+    _stub.painted("higgsfield", path)
+    with open(BAL, "w") as f: f.write(str(credits - COST))
+    observed = os.environ.get("STUB_HF_OBSERVED", model)
+    print(json.dumps([{"id": jid, "job_type": observed, "display_name": "Stub " + observed, "status": "completed",
+                       "result_url": "file://" + path}]))
+else:
+    print("stub higgsfield: unhandled " + " ".join(a), file=sys.stderr); sys.exit(2)

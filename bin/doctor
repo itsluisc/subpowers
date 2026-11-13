@@ -169,17 +169,71 @@ else
   if grep -qi "logged in with grok.com" <<<"$gm"; then
     gdrv="$(printf '%s\n' "$gm" | sed -nE 's/^[[:space:]]*[-*][[:space:]]+([A-Za-z0-9._-]+).*/\1/p' | grep -vi fast | head -n 1)"
     pass "logged in with grok.com (helper model: ${gdrv:-grok default}; API-key auth is switched off for every call)"
-    info "painter = xAI's Grok Imagine, chosen by xAI on every call"
+    info "painter = xAI's Grok Imagine; images ask for ${GROK_IMAGE_MODEL-grok-imagine-image-2.0}, video for grok-imagine-video-1.5 (set by the grok CLI)"
     ready+=(grok)
   else
     fail "grok is installed but not logged in with grok.com -> grok login"
   fi
 fi
 
+# Higgsfield: opt-in. It spends plan credits per image, so auto and council never use it.
+echo "Higgsfield painter (opt-in: --painter higgsfield, spends your Higgsfield plan credits)"
+if ! command -v higgsfield >/dev/null 2>&1; then
+  info "higgsfield CLI not installed (optional) -> brew install higgsfield   then higgsfield auth login"
+else
+  pass "higgsfield: $(higgsfield --version 2>/dev/null | head -n 1 | awk '{print $2}') at $(command -v higgsfield)"
+  hst="$(perl -e 'alarm shift; exec @ARGV' 30 higgsfield account status --json 2>/dev/null || true)"
+  hcred="$(python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("credits",""), d.get("subscription_plan_type",""))' <<<"$hst" 2>/dev/null || true)"
+  if [[ -n "$hcred" ]]; then
+    pass "signed in (${hcred#* } plan, ${hcred%% *} credits; browser sign-in, no API key)"
+    info "model = ${HIGGSFIELD_IMAGE_MODEL:-nano_banana_2_1} (job id named on every call); each image is priced first and capped at ${HIGGSFIELD_IMAGE_MAX_CREDITS:-2} credits"
+  else
+    info "higgsfield is installed but not signed in -> higgsfield auth login (optional painter)"
+  fi
+fi
+
+# HyperFrames: only for `--into PROJECT` (painting straight into a video project). Never upgraded from here.
+echo "HyperFrames (video editor, for --into PROJECT)"
+hf_ver=""; hf_latest=""
+if command -v hyperframes >/dev/null 2>&1; then
+  hf_ver="$(cd "${TMPDIR:-/tmp}" && hyperframes --version 2>/dev/null | head -n 1 | tr -d '[:space:]')"
+  pass "hyperframes CLI: ${hf_ver:-?} at $(command -v hyperframes)"
+  if command -v npm >/dev/null 2>&1; then
+    hf_latest="$(cd "${TMPDIR:-/tmp}" && perl -e 'alarm shift; exec @ARGV' 20 npm view hyperframes version 2>/dev/null | tail -n 1 | tr -d '[:space:]')"
+  fi
+  if [[ -z "$hf_latest" ]]; then
+    info "could not read the npm latest of hyperframes (offline or npm missing)"
+  elif [[ "$hf_ver" == "$hf_latest" ]]; then
+    pass "hyperframes is the npm latest ($hf_latest)"
+  elif [[ "$(printf '%s\n%s\n' "$hf_ver" "$hf_latest" | sort -V | tail -n 1)" == "$hf_latest" ]]; then
+    warn "hyperframes $hf_ver is behind the npm latest $hf_latest -> upgrade when your projects are ready: npm install -g hyperframes@$hf_latest (subpowers never upgrades it for you)"
+  else
+    info "hyperframes $hf_ver is newer than the npm latest $hf_latest"
+  fi
+else
+  info "hyperframes CLI not installed (only needed for --into) -> npm install -g hyperframes"
+fi
+
+echo "Versions"
+v_codex="$(codex --version 2>/dev/null | head -n 1 | sed 's/^codex-cli //')"
+v_agy=""; [[ -n "${AGY:-}" ]] && v_agy="$("$AGY" --version 2>/dev/null | head -n 1)"
+v_grok="$(grok --version 2>/dev/null | head -n 1 | awk '{print $2}')"
+g_latest=""
+if [[ -n "$v_grok" ]]; then
+  g_latest="$(cd "${TMPDIR:-/tmp}" && perl -e 'alarm shift; exec @ARGV' 30 grok update --check --json 2>/dev/null \
+    | python3 -c 'import json,sys
+try: j=json.load(sys.stdin); print(j.get("latestVersion") or "")
+except Exception: pass' 2>/dev/null)"
+fi
+info "codex ${v_codex:-not installed} (freshness: the ChatGPT painter line above) | agy ${v_agy:-not installed} (agy has no read-only update check) | grok ${v_grok:-not installed}${g_latest:+ (latest $g_latest)} | hyperframes ${hf_ver:-not installed}${hf_latest:+ (npm latest $hf_latest)}"
+if [[ -n "$v_grok" && -n "$g_latest" && "$v_grok" != "$g_latest" ]]; then warn "grok $v_grok is behind $g_latest -> grok update"; fi
+
 echo "Where agents find it"
 for d in "$HOME/.claude/skills/subpowers" "$HOME/.agents/skills/subpowers" "$HOME/.codex/skills/subpowers"; do
   if [[ -f "$d/SKILL.md" ]]; then pass "$d"; else warn "not linked at $d (bash install.sh links it)"; fi
 done
+if [[ -f "$HOME/.claude/skills/subpowers-hyperframes/SKILL.md" ]]; then pass "HyperFrames app chat skill: $HOME/.claude/skills/subpowers-hyperframes"
+else info "HyperFrames app chat skill not linked (optional) -> ln -s $skill/hyperframes/subpowers-hyperframes $HOME/.claude/skills/subpowers-hyperframes"; fi
 if command -v subpowers >/dev/null 2>&1; then pass "subpowers command on PATH"
 else warn "subpowers command not on PATH (agents can still run $here/subpowers; add ~/.local/bin to PATH to type it)"; fi
 # Informational, never a failure: the drift radar is optional.

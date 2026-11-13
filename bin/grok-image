@@ -12,7 +12,8 @@
 #            model argument, but the CLI honors GROK_IMAGE_GEN_MODEL_OVERRIDE /
 #            GROK_IMAGE_EDIT_MODEL_OVERRIDE (proved 2026-09-26: a bogus id
 #            returns HTTP 404 "model ... does not exist"). This door asks for
-#            grok-imagine-image-quality, the quality Imagine model; an account
+#            grok-imagine-image-2.0 (xAI retired grok-imagine-image-quality on
+#            2026-11-02; that id now quietly serves 2.0 at low quality). An account
 #            without access to it is retried once on xAI's remote default.
 #            Evidence on file: every JPEG carries a C2PA manifest signed
 #            "xAI Grok Imagine", org SpaceXAI, trainedAlgorithmicMedia.
@@ -39,7 +40,7 @@
 #   --driver  pin the relay model (default: newest non-"fast" model `grok models` lists).
 #
 # Env: GROK_IMAGE_TIMEOUT (seconds, default 600), GROK_IMAGE_EFFORT (default high),
-#      GROK_IMAGE_MODEL (default grok-imagine-image-quality; set it empty for
+#      GROK_IMAGE_MODEL (default grok-imagine-image-2.0; set it empty for
 #      xAI's remote default).
 #
 # Writes <out>.prompt.txt beside every image. Prints the output path on stdout;
@@ -108,8 +109,8 @@ if [[ -z "$driver" ]]; then
 fi
 effort="${GROK_IMAGE_EFFORT:-high}"
 tmo="${GROK_IMAGE_TIMEOUT:-600}"
-# Quality Imagine model by default; GROK_IMAGE_MODEL="" means xAI's remote default.
-imodel="${GROK_IMAGE_MODEL-grok-imagine-image-quality}"
+# Imagine 2.0 by default (the old quality id was retired 2026-11-02); GROK_IMAGE_MODEL="" means xAI's remote default.
+imodel="${GROK_IMAGE_MODEL-grok-imagine-image-2.0}"
 
 mkdir -p "$(dirname "$out")" 2>/dev/null || true
 out_dir="$(cd "$(dirname "$out")" 2>/dev/null && pwd)" || {
@@ -238,7 +239,7 @@ run_grok "$imodel"
 imodel_note="${imodel:-xAI remote default}"
 if [[ -n "$imodel" && ( -z "$saved" || ! -f "$saved" ) ]] \
    && grep -qiE 'does not exist|not have access|not.found' <<<"$terr"; then
-  # This account cannot use the quality model: paint once more on xAI's default.
+  # This account cannot use the requested model: paint once more on xAI's default.
   echo "grok-image: ${imodel} unavailable on this account; retrying on xAI's default Imagine model" >&2
   run_grok ""
   imodel_note="xAI remote default (${imodel} unavailable on this account)"

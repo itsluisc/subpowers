@@ -1,0 +1,117 @@
+#!/opt/homebrew/bin/python3.14
+"""set-plate: a picture of a video's set with the people taken out, for painting "on that set".
+
+    set-plate VIDEO[@SECONDS] OUT.png [--keep-people]
+
+Painters borrow faces from every reference (subpowers SKILL.md: Grok blended Luis with a podcast host), so a frame
+with the on-camera people in it cannot be a light-and-set reference as is. This grabs one frame (default: the middle),
+finds every face with YuNet (OpenCV), covers each person's head and body (face box widened 2.4x, down to the bottom
+of the frame) and fills the hole from the surrounding set (OpenCV inpaint). What is left carries the set's light,
+colours, lens and grain. Prints OUT and a one-line receipt to stderr (faces found, area covered).
+
+No face found is not an error: the frame is used as is and the receipt says so. A grab that fails exits 2.
+"""
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import cv2
+import numpy as np
+
+YUNET = Path.home() / ".claude" / "models" / "yunet" / "face_detection_yunet_2023mar.onnx"
+
+
+def ffmpeg() -> str:
+    """The HyperFrames app's ffmpeg, then ffmpeg on PATH (Agentic Cuts' door lock may refuse that one)."""
+    if os.environ.get("HYPERFRAMES_FFMPEG_PATH"):
+        return os.environ["HYPERFRAMES_FFMPEG_PATH"]
+    found = sorted(Path.home().glob("Library/Application Support/HyperFrames/runtimes/ffmpeg-*/ffmpeg"),
+                   key=lambda p: p.stat().st_mtime)
+    return str(found[-1]) if found else "ffmpeg"
+
+
+def duration(video: str) -> float:
+    probe = Path(ffmpeg()).with_name("ffprobe")
+    run = subprocess.run([str(probe) if probe.exists() else "ffprobe", "-v", "error", "-show_entries",
+                          "format=duration", "-of", "csv=p=0", video], capture_output=True, text=True)
+    try:
+        return float(run.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def grab(spec: str) -> np.ndarray:
+    path, _, at = spec.rpartition("@") if "@" in spec and Path(spec.rpartition("@")[0]).exists() else (spec, "", "")
+    if Path(path).suffix.lower() in {".png", ".jpg", ".jpeg", ".webp"}:
+        img = cv2.imread(path)
+        if img is None:
+            raise SystemExit(f"set-plate: cannot read {path}")
+        return img
+    t = float(at) if at else duration(path) / 2
+    run = subprocess.run([ffmpeg(), "-v", "error", "-ss", f"{t:.3f}", "-i", path, "-frames:v", "1",
+                          "-f", "image2pipe", "-vcodec", "png", "-"], capture_output=True)
+    img = cv2.imdecode(np.frombuffer(run.stdout, np.uint8), cv2.IMREAD_COLOR) if run.stdout else None
+    if img is None:
+        raise SystemExit(f"set-plate: no frame at {t:.2f}s of {path}: {run.stderr.decode()[-300:]}")
+    return img
+
+
+def faces(img: np.ndarray) -> list[tuple[int, int, int, int]]:
+    if not YUNET.is_file():
+        raise SystemExit(f"set-plate: YuNet model missing at {YUNET}")
+    h, w = img.shape[:2]
+    det = cv2.FaceDetectorYN.create(str(YUNET), "", (w, h), 0.6)
+    _, found = det.detect(img)
+    return [tuple(int(v) for v in f[:4]) for f in (found if found is not None else [])]
+
+
+def person_mask(shape: tuple[int, int], boxes: list[tuple[int, int, int, int]]) -> np.ndarray:
+    """Each face widened into its whole person: 2.4 face widths, from above the hair to the frame bottom."""
+    h, w = shape
+    mask = np.zeros((h, w), np.uint8)
+    for x, y, fw, fh in boxes:
+        cx = x + fw / 2
+        left, right = int(max(0, cx - 1.2 * fw * 1.6)), int(min(w, cx + 1.2 * fw * 1.6))
+        top = int(max(0, y - 0.7 * fh))
+        mask[top:h, left:right] = 255
+        # shoulders and arms spread wider below the chin
+        chin = int(min(h, y + 1.4 * fh))
+        mask[chin:h, int(max(0, cx - 2.6 * fw)):int(min(w, cx + 2.6 * fw))] = 255
+    return mask
+
+
+def plate(spec: str, out: str, keep_people: bool = False) -> dict:
+    img = grab(spec)
+    boxes = [] if keep_people else faces(img)
+    mask = person_mask(img.shape[:2], boxes)
+    covered = float(mask.mean() / 255)
+    if boxes:
+        small = cv2.resize(img, None, fx=0.5, fy=0.5)  # inpaint at half size: fast, and a lighting plate needs no detail
+        fill = cv2.inpaint(small, cv2.resize(mask, (small.shape[1], small.shape[0])), 9, cv2.INPAINT_TELEA)
+        fill = cv2.GaussianBlur(cv2.resize(fill, (img.shape[1], img.shape[0])), (0, 0), 6)
+        img = np.where(mask[..., None] > 0, fill, img)
+    cv2.imwrite(out, img)
+    return {"plate": out, "source": spec, "faces": len(boxes), "covered": round(covered, 3),
+            "note": "no face found; the frame is used as is" if not boxes and not keep_people else ""}
+
+
+def main(argv: list[str]) -> int:
+    args = [a for a in argv if a != "--keep-people"]
+    if len(args) != 2:
+        print(__doc__, file=sys.stderr)
+        return 2
+    receipt = plate(args[0], args[1], "--keep-people" in argv)
+    print(f"set-plate: {json.dumps(receipt)}", file=sys.stderr)
+    if receipt["covered"] > 0.85:
+        print("set-plate: the people cover almost the whole frame; pick a wider or emptier moment (VIDEO@SECONDS)",
+              file=sys.stderr)
+    print(args[1])
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

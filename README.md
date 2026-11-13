@@ -125,24 +125,25 @@ The receipt also says when an image was cropped or upscaled on your machine.
 
 **Can it make photos of real people?** Please don't use it for photorealistic fakes of real people. Nothing in the code stops you, so it's on you. Your own face (`--refs me`) and made-up characters are what it's for.
 
-## The three painters
+## The painters
 
 <details>
 <summary>What each plan needs, how fast it is, what shapes it paints</summary>
 
-| | ChatGPT | Google (Nano Banana) | Grok |
-|---|---|---|---|
-| You need | a ChatGPT plan with Codex access + `codex login` | a Google AI plan with Antigravity + `agy` signed in | SuperGrok + the Grok CLI + `grok login` |
-| Model | OpenAI's current image model | Nano Banana 2 (Gemini 3.1 Flash Image) | Grok Imagine (quality model) |
-| Speed (measured) | 60 to 100 s | 20 to 120 s | 45 to 100 s |
-| Shapes | square, 3:2, 2:3 exact; others requested | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 |
-| Reference photos | yes, any number | yes, up to 3 | yes (image edit) |
+| | ChatGPT | Google (Nano Banana) | Grok | Higgsfield (opt-in) |
+|---|---|---|---|---|
+| You need | a ChatGPT plan with Codex access + `codex login` | a Google AI plan with Antigravity + `agy` signed in | SuperGrok + the Grok CLI + `grok login` | a Higgsfield plan + the official `higgsfield` CLI + `higgsfield auth login` |
+| Model | OpenAI's current image model (chosen by OpenAI) | Nano Banana 2 (`gemini-3.1-flash-image`, read back from the job) | Grok Imagine 2.0 (`grok-imagine-image-2.0` requested) | Nano Banana 2.1 by default (`nano_banana_2_1`); also `gpt_image_2_6`, `grok_image_2_0` |
+| Speed (measured) | 30 to 100 s (30 s on 2026-11-13) | 20 to 120 s (42 s on 2026-11-13) | 35 to 100 s (38 s on 2026-11-13) | about 25 s (24 s on 2026-11-13, one run) |
+| Shapes | square, 3:2, 2:3 exact; others requested | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 | the model's own list (Nano Banana 2.1: 1:1 to 21:9, 4:5, 5:4) |
+| Reference photos | yes, any number | yes, up to 3 | yes (image edit) | yes |
+| Cost per image | none beyond the plan | none beyond the plan | none beyond the plan | plan credits (about 1.5; priced first, refused above 2) |
 
 </details>
 
-`subpowers image` uses ChatGPT when it's connected, then Google, then Grok. Pick one with `--painter chatgpt|google|grok`, all of them with `--painter council`, or set `SUBPOWERS_PAINTER`. Every painter runs with API-key auth switched off, so it can only ever use your plan.
+`subpowers image` uses ChatGPT when it's connected, then Google, then Grok. Pick one with `--painter chatgpt|google|grok`, all of them with `--painter council`, or set `SUBPOWERS_PAINTER`. Higgsfield spends credits per image, so it is never picked by `auto` or `council`: ask for it with `--painter higgsfield`. Every painter runs with API-key auth switched off, so it can only ever use your plan.
 
-**Video.** `subpowers video "<prompt>" out.mp4` makes a short clip with sound on your SuperGrok plan (Grok Imagine video, 1 to 15 s, 480p or 720p). Give it a first frame with `--first img.png`, people or products with `--ref`/`--refs`, or nothing at all and it paints the first frame for you on your image plan, then animates it. Accounts in Grok's privacy mode (`/privacy` set to Opt out) need to opt in or add a video storage bucket first. Google's Gemini Omni video is on the [roadmap](ROADMAP.md).
+**Video.** `subpowers video "<prompt>" out.mp4` makes a short clip with sound on your SuperGrok plan (Grok Imagine video 1.5 as the grok CLI asks for it, 1 to 15 s, 480p or 720p). Give it a first frame with `--first img.png`, people or products with `--ref`/`--refs`, or nothing at all and it paints the first frame for you on your image plan, then animates it. Accounts in Grok's privacy mode (`/privacy` set to Opt out) need to opt in or add a video storage bucket first. Google's Gemini Omni video is on the [roadmap](ROADMAP.md).
 
 **Stop-motion.** `subpowers stopmotion "a small clay fox tiptoes across a felt meadow and waves" out.mp4` plans the frames on your subscription, paints frame 1, then paints every other frame from frame 1 so the set and the character stay put, and hands back an mp4 plus a looping webp. `--resume` picks up after a spent quota without repainting what is done.
 
@@ -172,7 +173,7 @@ subpowers slideshow slider.webp a.png b.png c.png    # one looping slider of you
 
 | Piece | How it stays current |
 |---|---|
-| The painters | OpenAI and Google pick the image model on their side on every call, so it can't go stale. Grok is asked for xAI's quality Imagine model (`grok-imagine-image-quality`); a plan without it falls back to xAI's default by itself. |
+| The painters | OpenAI and Google pick the image model on their side on every call; the receipt keeps what was requested apart from what was observed. Grok is asked for `grok-imagine-image-2.0` (xAI retired `grok-imagine-image-quality` on 2026-11-02); a plan without it falls back to xAI's default by itself. Higgsfield names its model on every job and the receipt flags any job that reports a different one. |
 | The helper models | The text model that hands your prompt to the painter runs at **high** effort, because it writes what the painter actually sees. ChatGPT: read fresh from codex's own model list on *your* account, newest first, retiring models skipped. Google: the newest Gemini Flash at its High setting. Grok: the newest non-fast Grok model. |
 | The codex CLI | Checked once a day and updated automatically. Turn it off with `SUBPOWERS_NO_AUTOUPDATE=1`, in your shell or in `~/.subpowers/config` (do this if Homebrew or npm manages your codex). |
 
@@ -219,6 +220,66 @@ Update anytime with `subpowers update` (check what you have with `subpowers --ve
 Never ask the user for an API key, and never put one in. subpowers only uses the logins they own.
 
 ## Good to know
+
+### Linux / VPS jobs that survive disconnects
+
+Install subpowers and log into your own native CLIs **on the remote host** first.
+No tokens or personal files are copied by these commands. SSH must already work,
+and Linux must provide `systemd-run` (system manager for root; user manager for
+other users). Images are generated on the provider's servers, not a VPS GPU.
+
+```bash
+subpowers remote my-vps image "a single yellow banana on a white table, photoreal, no text" --painter chatgpt
+# Keep the returned job ID. This starts a bounded, persistent systemd job.
+subpowers remote my-vps status JOB_ID
+subpowers remote my-vps fetch JOB_ID /absolute/local/banana.png
+```
+
+Reconnect to the same job after a disconnect; don't resubmit an unknown outcome.
+Jobs are kept in `~/.subpowers/jobs/` on the VPS with status, logs, image and
+provenance. They are not automatically deleted or backed up. Media upload to an
+archive and checksum verification remain separate operations. Up to 1.5 GB RAM,
+one CPU, and 16 minutes per image job; no unattended recurring generations.
+
+### AGY image-tool availability and model truth
+
+AGY 1.3.1 can advertise `generate_image` but reject it as an unknown tool.
+`--dangerously-skip-permissions` approves existing tools; it cannot register a
+missing executor. A native text login or a text `SUCCESS` does not prove image
+generation. Default transport stays **native**. Failure profiles no longer retain
+copied OAuth tokens.
+
+**A native alternative was verified:** the official full Antigravity 2.21.0
+Linux app successfully executed `generate_image` on a headless VPS with a
+virtual display and window manager. Its desktop Google login is separate from
+the CLI login. You can operate that app through a private remote desktop;
+installing the app or seeing its Remote Control instance online alone is not
+image proof. This is a separate runtime, not a repaired `agy -p` 1.3.1 executor.
+The observed image model in that test was `gemini-3.1-flash-image` (Nano Banana 2),
+not 2.1. This package does not silently drive a desktop UI or promise a native
+2.1 rollout; the CLI default remains unchanged.
+
+An **optional, unofficial** transport exists for users who have independently
+configured an Antigravity OAuth CLIProxy on loopback and accepted the provider's
+terms risk. It is not enabled or installed automatically:
+
+```bash
+AGY_IMAGE_TRANSPORT=cliproxy subpowers image "a banana" /absolute/banana.png --painter antigravity
+```
+
+It sends no Google Developer API key. `AGY_IMAGE_PROXY_URL` must be a loopback HTTP
+origin; redirects and remote image URLs are refused. Proxy key defaults to
+`~/.cli-proxy-api/.local-key`. `AGY_PROXY_IMAGE_MODEL` defaults to the verified
+`gemini-3.1-flash-image` (Nano Banana 2) and must be listed under the proxy's
+Antigravity provider; unknown model requests fail instead of silently downgrading.
+One HTTP generation request, no automatic retry. A JSON sidecar records the
+requested and response-observed IDs, exact transport, dimensions, and SHA256.
+It explicitly says **not fixed native AGY**. Tests use a local fake proxy only.
+
+Nano Banana 2.1 is available on Higgsfield under `nano_banana_2_1`; this is not
+proof of an AGY ID or rollout. Native painters are server-selected, which is not
+a guarantee of the latest marketing model. Trust the actual receipt. Use an
+official provider surface if its native CLI cannot generate an image.
 
 - Images use your plan's normal usage limits; an image costs more of your allowance than a text message. If a plan runs out, that painter says so and the default mode moves to your next plan. It never switches to a paid API.
 - This rides on the official `codex`, `agy` and `grok` command-line tools, not on a published image API, so providers can change behavior. The doctor and the daily codex update are there for exactly that.
