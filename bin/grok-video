@@ -167,7 +167,7 @@ vlist=""; for v in ${voices[@]+"${voices[@]}"}; do vlist="${vlist:+$vlist }$v"; 
   echo "  date: $(date '+%Y-%m-%d %H:%M:%S %z')"
   echo "  grok: $(grok --version 2>/dev/null | head -n 1)"
   echo "  auth: grok.com session (API-key auth disabled for this call)"
-  echo "  tool: reference_to_video (xAI Grok Imagine video, model chosen server-side)"
+  echo "  tool: reference_to_video (xAI Grok Imagine video; model the grok CLI asks for (1.0.77+): grok-imagine-video-1.5; the answering id is not reported back)"
   echo "  driver model: ${driver:-grok default} (reasoning ${effort})"
   echo "  prompt relayed verbatim: ${verbatim}"
   echo "  first frame: ${first:-none} | last frame: ${last:-none} | references: ${#refs[@]} | voices: ${vlist:-none}"

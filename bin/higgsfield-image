@@ -1,0 +1,191 @@
+#!/usr/bin/env bash
+# higgsfield-image: paint one image on the user's own Higgsfield plan, through the official
+# `higgsfield` CLI (browser sign-in, no API key). Same contract as the other painters.
+#
+# HOW IT WORKS (higgsfield 1.2.2, measured 2026-11-13):
+#   painter  `higgsfield generate create <model> --prompt ... --wait --json`. The model is named
+#            by Higgsfield's own job id, so the receipt can show the id we asked for AND the id
+#            the finished job reports. Default nano_banana_2_1 (Google Nano Banana 2.1, newer than
+#            the Nano Banana 2 that Antigravity paints with today); gpt_image_2_6 and
+#            grok_image_2_0 also work (HIGGSFIELD_IMAGE_MODEL).
+#   cost     Higgsfield spends plan CREDITS per image (the other painters do not). Before painting,
+#            `higgsfield generate cost` prices the job; above HIGGSFIELD_IMAGE_MAX_CREDITS (default 2)
+#            it refuses. The receipt records the estimate and the balance before and after.
+#   opt-in   for that reason this painter is never picked by `auto` or `council`: ask for it by name
+#            (--painter higgsfield).
+#   auth     `higgsfield auth login` once (OAuth in the browser). No key is read or written here.
+#
+# Usage:
+#   higgsfield-image "<prompt>" <out.(png|jpg|webp)> [--size WxH] [--aspect R] [--ref IMG]... [--model JOB_TYPE]
+#
+# Env: HIGGSFIELD_IMAGE_MODEL (default nano_banana_2_1), HIGGSFIELD_IMAGE_RESOLUTION (1k|2k|4k, default 1k),
+#      HIGGSFIELD_IMAGE_MAX_CREDITS (default 2), HIGGSFIELD_IMAGE_TIMEOUT (seconds, default 600).
+#
+# Exit: 0 delivered, 1 failed, 2 usage, 3 not connected, 5 painted (credits spent) but not delivered.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Per-user defaults: KEY=value lines in ~/.subpowers/config (only this painter's keys are read).
+cfg="${SUBPOWERS_HOME:-$HOME/.subpowers}/config"
+if [[ -f "$cfg" ]]; then
+  while IFS='=' read -r k v; do
+    case "$k" in HIGGSFIELD_IMAGE_MODEL|HIGGSFIELD_IMAGE_RESOLUTION|HIGGSFIELD_IMAGE_MAX_CREDITS)
+      [[ -z "${!k:-}" ]] && export "$k=$v" ;; esac
+  done <"$cfg"
+fi
+export SUBPOWERS_BIN="$here"
+exec python3 - "$@" <<'PY'
+import json, math, os, shutil, subprocess, sys, tempfile, time, urllib.request
+
+me = "higgsfield-image"
+def say(*a): print(f"{me}:", *a, file=sys.stderr)
+def usage():
+    say('usage: higgsfield-image "<prompt>" <out.png|out.jpg|out.webp> [--size WxH] [--aspect R] [--ref IMG]... [--model JOB_TYPE]')
+    sys.exit(2)
+
+argv = sys.argv[1:]
+if len(argv) < 2: usage()
+prompt, out = argv[0], argv[1]
+size = aspect = None; refs = []
+model = os.environ.get("HIGGSFIELD_IMAGE_MODEL") or "nano_banana_2_1"
+i = 2
+while i < len(argv):
+    a = argv[i]
+    if a in ("--size", "--aspect", "--ref", "--model", "--driver") and i + 1 < len(argv):
+        v = argv[i + 1]
+        if a == "--size": size = v
+        elif a == "--aspect": aspect = v
+        elif a == "--ref": refs.append(v)
+        elif a == "--model": model = v
+        i += 2
+    else:
+        usage()
+if size and not (size.count("x") == 1 and all(p.isdigit() and int(p) > 0 for p in size.split("x"))):
+    say("--size must look like 1600x900"); sys.exit(2)
+for r in refs:
+    if not os.path.isfile(r): say(f"reference not found: {r}"); sys.exit(2)
+res = os.environ.get("HIGGSFIELD_IMAGE_RESOLUTION") or "1k"
+cap = float(os.environ.get("HIGGSFIELD_IMAGE_MAX_CREDITS") or 2)
+tmo = int(os.environ.get("HIGGSFIELD_IMAGE_TIMEOUT") or 600)
+hf = shutil.which("higgsfield")
+if not hf:
+    say("the higgsfield CLI is not installed (brew install higgsfield, then: higgsfield auth login)"); sys.exit(3)
+
+def cli(*args, timeout=60):
+    r = subprocess.run([hf, *args, "--json", "--no-color"], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[-400:] or f"exit {r.returncode}")
+    return json.loads(r.stdout)
+
+def balance():
+    try: return float(cli("account", "status").get("credits"))
+    except Exception: return None
+
+t0 = time.time()
+try:
+    st = cli("account", "status")
+except Exception as e:
+    say(f"not signed in to Higgsfield ({e}). Run: higgsfield auth login"); sys.exit(3)
+before = st.get("credits"); plan = st.get("subscription_plan_type") or "?"
+
+# The model's own aspect list; the nearest one (log distance) to --size, else --aspect, else 1:1.
+try:
+    params = {p["name"]: p for p in cli("model", "get", model)["params"]}
+except Exception as e:
+    say(f"Higgsfield does not list the model '{model}' ({e}). See: higgsfield model list --image"); sys.exit(2)
+enum = [a for a in (params.get("aspect_ratio", {}).get("enum") or []) if a != "auto"]
+if aspect:
+    if enum and aspect not in enum: say(f"--aspect must be one of {' '.join(enum)} for {model}"); sys.exit(2)
+elif size and enum:
+    w, h = map(int, size.split("x")); want = math.log(w / h)
+    aspect = min(enum, key=lambda a: abs(math.log(int(a.split(":")[0]) / int(a.split(":")[1])) - want))
+else:
+    aspect = "1:1"
+
+job = ["--prompt", prompt]
+if "aspect_ratio" in params: job += ["--aspect_ratio", aspect]
+if "resolution" in params: job += ["--resolution", res]
+if "quality" in params: job += ["--quality", os.environ.get("HIGGSFIELD_IMAGE_QUALITY") or "high"]
+for r in refs: job += ["--image-references", os.path.abspath(r)]
+
+try:
+    est = float(cli("generate", "cost", model, *job, timeout=120).get("credits"))
+except Exception as e:
+    say(f"could not price the job ({e})"); sys.exit(1)
+if est > cap:
+    say(f"{model} would cost {est} credits, over the cap of {cap} (HIGGSFIELD_IMAGE_MAX_CREDITS). Nothing was spent."); sys.exit(1)
+if before is not None and float(before) < est:
+    say(f"dry (quota): {before} credits left, the job needs {est}. Try another painter."); sys.exit(1)
+
+t1 = time.time()
+r = subprocess.run([hf, "generate", "create", model, *job, "--wait", "--wait-timeout", f"{tmo}s", "--json", "--no-color"],
+                   capture_output=True, text=True, timeout=tmo + 60)
+paint_s = round(time.time() - t1)
+try:
+    jobs = json.loads(r.stdout); jobs = jobs if isinstance(jobs, list) else [jobs]
+except Exception:
+    jobs = []
+done = [j for j in jobs if j.get("status") == "completed" and j.get("result_url")]
+if r.returncode != 0 or not done:
+    tail = (r.stderr or r.stdout or "").strip()[-400:]
+    if any(k in tail.lower() for k in ("insufficient", "not enough credits", "402", "quota")):
+        say(f"dry (quota): {tail}"); sys.exit(1)
+    say(f"the job did not complete (exit {r.returncode}): {tail}"); sys.exit(1)
+j = done[-1]
+
+# From here the plan has paid: any failure is a delivery failure (exit 5), never a repaint.
+try:
+    out = os.path.abspath(out); os.makedirs(os.path.dirname(out), exist_ok=True)
+    stem, out_ext = os.path.splitext(out); out_ext = out_ext.lstrip(".").lower()
+    url = j["result_url"]; src_ext = url.rsplit(".", 1)[-1].split("?")[0].lower()
+    work = tempfile.mkdtemp(prefix="higgsfield-image.")
+    raw = os.path.join(work, "raw." + src_ext)
+    urllib.request.urlretrieve(url, raw)
+    ops = [sys.executable, os.path.join(os.environ["SUBPOWERS_BIN"], "imgops")]
+    def dims(p):
+        q = subprocess.run(ops + ["dims", p], capture_output=True, text=True); return q.stdout.strip()
+    raw_dims = dims(raw); notes = []
+    has_ops = subprocess.run(ops + ["backend"], capture_output=True).returncode == 0
+    same = {"jpg": "jpeg", "jpeg": "jpeg", "png": "png", "webp": "webp"}
+    need_conv = same.get(out_ext) != same.get(src_ext)
+    need_size = bool(size and raw_dims and raw_dims != size)
+    if not has_ops and (need_conv or need_size):
+        out = f"{stem}.{src_ext}"; need_conv = need_size = False
+        notes.append("the painter's own file, untouched: no Pillow or sips here")
+    original = f"{stem}.original.{src_ext}"
+    if need_conv or need_size:
+        shutil.copy(raw, original); notes.append(f"untouched original kept at {original}")
+    deliver = os.path.join(work, "deliver." + src_ext); shutil.copy(raw, deliver)
+    if need_size:
+        rw, rh = map(int, raw_dims.split("x")); sw, sh = map(int, size.split("x"))
+        if rw * sh != rh * sw:
+            cw, ch = (rh * sw // sh, rh) if rw * sh > rh * sw else (rw, rw * sh // sw)
+            subprocess.run(ops + ["crop", deliver, str(cw), str(ch)], check=True)
+            notes.append(f"center-cropped {raw_dims} -> {cw}x{ch}")
+        subprocess.run(ops + ["resize", deliver, str(sw), str(sh)], check=True)
+        notes.append(("UPSCALED" if sw > rw or sh > rh else "resized") + f" to {size} locally")
+    if need_conv:
+        subprocess.run(ops + ["convert", deliver, out], check=True); notes.append(f"converted {src_ext} -> {out_ext}")
+    else:
+        shutil.copy(deliver, out)
+    after = balance()
+    spent = (round(float(before) - after, 3) if before is not None and after is not None else None)
+    observed = j.get("job_type") or "?"
+    rec = [
+        f"prompt: {prompt}",
+        f"painter: Higgsfield ({plan} plan, official higgsfield CLI, browser sign-in, no API key)",
+        f"  image model requested: {model} | job reports: {observed} ({j.get('display_name', '?')})"
+        + ("" if observed == model else "  <- DIFFERENT from the request"),
+        f"  job id: {j.get('id')} | aspect requested: {aspect} | resolution: {res}",
+        f"  references: {len(refs)}",
+        f"  credits: estimated {est}; balance {before} -> {after}" + (f" (spent {spent})" if spent is not None else ""),
+        f"  timings: paint {paint_s}s, total {round(time.time() - t0)}s",
+        f"  delivered: {out} ({dims(out)}; painter returned {raw_dims})" + (f"; {'; '.join(notes)}" if notes else ""),
+        f"  result url: {url}",
+    ]
+    with open(f"{stem}.prompt.txt", "w") as f: f.write("\n".join(rec) + "\n")
+except Exception as e:
+    say(f"painted (credits spent) but not delivered: {e}. The job's file: {j.get('result_url')}"); sys.exit(5)
+
+say(f"painted by Higgsfield {observed}; requested={model}; aspect={aspect}; credits~{est}; refs={len(refs)}; {round(time.time() - t0)}s")
+print(out)
+PY

@@ -359,7 +359,7 @@ signer = "OpenAI" if b"OpenAI OpCo" in d else "unknown signer"
 print(f"{name}/{ver} (signed by {signer})")
 PY
 )"
-painter="OpenAI's current ChatGPT image model, chosen server-side (last confirmed: GPT Image 2.5, rolled to Codex 2026-09-08; flare vs sunburst is not visible on this path) | C2PA says: ${c2pa}"
+painter="OpenAI's current ChatGPT image model, chosen server-side (last confirmed on this path: GPT Image 2.5, rolled to Codex 2026-09-08; Images 2.6 was announced 2026-11-04 but which version answered is not visible on this path) | C2PA says: ${c2pa}"
 {
   echo "PROMPT (as given):"
   echo "$prompt"

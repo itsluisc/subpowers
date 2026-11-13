@@ -73,7 +73,8 @@ elif "-p" in cmd and _stub.arg("--output-format") == "text":  # a text-only call
     print(ans)
 elif "-p" in cmd:
     task = _stub.arg("-p")
-    m = re.search(r'AspectRatio to "([0-9:]+)"', task)
+    # older task text set AspectRatio directly; since 2026-10-23 the painter delegates to the image-generator subagent
+    m = re.search(r'AspectRatio to "([0-9:]+)"', task) or re.search(r"aspect ratio ([0-9]+:[0-9]+)", task)
     aspect = m.group(1) if m else "1:1"
     refs = re.findall(r'"(/[^"]+)"', task.split("\n", 1)[0]) if task.startswith("There are") else []
     cid = str(uuid.uuid4())

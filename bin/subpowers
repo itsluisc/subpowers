@@ -15,11 +15,23 @@
 #   subpowers doctor [--fix] [--smoke]  |  powers  |  update  |  --version
 #   subpowers canary [--live] [--json] [--notify]  drift radar (vendor CLIs changing); --install-launchagent
 #
+# Into a HyperFrames project (an Agentic Cuts door project, or any folder with index.html):
+#   subpowers image|video|stopmotion "<prompt>" [out] --into PROJECT [--at S] [--duration S]
+#             [--layer-name NAME] [--place lower|full|box:x,y,w,h] [--keep-audio] [--snapshot]
+#       paints straight into PROJECT/assets/generated/<slug>/ (receipt beside it), mounts it as ONE new
+#       editable layer (compositions/gen-<slug>.html), and runs `hyperframes lint` (no new errors, or
+#       index.html is put back). Prints the media path, then the layer receipt. With [out], a copy lands there too.
+#       For video, --duration stays the clip's own length and the layer runs as long as the clip (--layer-duration S to shorten).
+#   subpowers hf add --project P --file F [...]   mount a file you already have as a layer, no painting
+#   subpowers hf remove --project P --layer gen-<slug>   |   subpowers hf skill --project P [--attach]
+#
 # Painters (each runs on YOUR login, never an API key):
-#   chatgpt      OpenAI's current image model through the codex CLI (ChatGPT plan). 60-100 s.
+#   chatgpt      OpenAI's current image model through the codex CLI (ChatGPT plan). 30-100 s.
 #   antigravity  Google's Nano Banana 2 through the Antigravity CLI (Google AI plan). 20-120 s.
 #                ("google" is an alias; the painter id stays antigravity.)
-#   grok         xAI's Grok Imagine through the Grok CLI (SuperGrok plan). 45-100 s.
+#   grok         xAI's Grok Imagine 2.0 through the Grok CLI (SuperGrok plan). 35-100 s.
+#   higgsfield   opt-in: Higgsfield's own models (default Nano Banana 2.1) through the official higgsfield CLI.
+#                Spends plan credits per image (capped, priced first), so auto and council never pick it.
 # --painter auto (default): the first connected painter; if it fails (paused plan, quota), the next.
 # --painter council (or all): every connected painter paints the same prompt in parallel, plus a side-by-side
 #   sheet, so you pick the best one. SUBPOWERS_PAINTER sets the default.
@@ -33,7 +45,9 @@ done
 here="$(cd "$(dirname "$src")" && pwd)"
 HOME_DIR="${SUBPOWERS_HOME:-$HOME/.subpowers}"
 ORDER="chatgpt antigravity grok"
-VERSION="0.3.2"
+# Opt-in painters spend plan credits per image, so auto and council never pick them; ask by name.
+OPTIN="higgsfield"
+VERSION="0.4.0"
 
 # The help is the header comment, read up to its first non-comment line so it cannot drift.
 usage() { awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$here/subpowers" >&2; exit "${1:-2}"; }
@@ -84,13 +98,22 @@ chk_grok() {
 }
 has_antigravity() { login_cached antigravity chk_antigravity; }
 has_grok() { login_cached grok chk_grok; }
-has() { case "$1" in chatgpt) has_chatgpt ;; antigravity) has_antigravity ;; grok) has_grok ;; *) return 1 ;; esac; }
+chk_higgsfield() {
+  local o; command -v higgsfield >/dev/null 2>&1 || return 1
+  local rc=0
+  o="$(tmo higgsfield account status --json 2>&1)" || rc=$?
+  if [[ $rc -eq 124 || $rc -eq 142 ]]; then return 0; fi
+  grep -q '"credits"' <<<"$o"
+}
+has_higgsfield() { login_cached higgsfield chk_higgsfield; }
+has() { case "$1" in chatgpt) has_chatgpt ;; antigravity) has_antigravity ;; grok) has_grok ;; higgsfield) has_higgsfield ;; *) return 1 ;; esac; }
 connected() { local p out=""; for p in $ORDER; do has "$p" && out="$out $p"; done; echo "${out# }"; }
 norm_painter() {
   case "$1" in
     openai|gpt) echo chatgpt ;;
     google|gemini|nano-banana|nanobanana) echo antigravity ;;
     xai|imagine|grok-imagine|supergrok) echo grok ;;
+    higgs|hf) echo higgsfield ;;
     council|everyone|every) echo all ;;   # council: every subscription paints it, you pick the best
     *) echo "$1" ;;
   esac
@@ -196,15 +219,72 @@ PY
   if [[ -s "$out" ]]; then echo "$out"; else echo "$f"; fi
 }
 
+# --into PROJECT: paint straight into a HyperFrames project and mount the result as one layer (bin/hf-into).
+# into_opt eats one --into option (returns 1 when the word is not one); into_begin reserves the folder
+# before anything is painted (a bad project or time is refused for free); into_end mounts the layer.
+into=""; into_args=(); into_add=(); into_user_out=""; INTO_OUT=""; into_done=""
+into_opt() {  # into_opt "$@" -> sets INTO_EAT to how many words it used
+  INTO_EAT=0
+  case "$1" in
+    --into) [[ $# -ge 2 ]] || usage; into="$2"; INTO_EAT=2 ;;
+    --at|--duration|--layer-name|--place) [[ $# -ge 2 ]] || usage; into_args+=("$1" "$2"); INTO_EAT=2 ;;
+    --layer-duration) [[ $# -ge 2 ]] || usage; into_args+=(--duration "$2"); INTO_EAT=2 ;;
+    --keep-audio|--snapshot) into_add+=("$1"); INTO_EAT=1 ;;
+    *) return 1 ;;
+  esac
+}
+into_check() {  # an --at/--place without --into is a mistake, not a silent no-op
+  if [[ -z "$into" && ( ${#into_args[@]} -gt 0 || ${#into_add[@]} -gt 0 ) ]]; then
+    say "--at, --duration, --layer-name, --place, --keep-audio and --snapshot only work with --into PROJECT"; exit 2
+  fi
+}
+into_begin() {  # into_begin <kind> <ext> <prompt>: sets INTO_OUT, INTO_SIZE, INTO_ASPECT
+  local line
+  line="$(python3 "$here/hf-into" plan --project "$into" --kind "$1" --ext "$2" --prompt "$3" ${into_args[@]+"${into_args[@]}"})" || exit $?
+  IFS=$'\t' read -r INTO_OUT INTO_SIZE INTO_ASPECT <<<"$line"
+  [[ -n "$INTO_OUT" ]] || { say "could not reserve a folder in $into"; exit 1; }
+  trap into_cleanup EXIT
+}
+into_cleanup() {  # a reserved folder that never got its media goes away; a painted result never does
+  if [[ -z "$into_done" && -n "$INTO_OUT" ]]; then python3 "$here/hf-into" abandon --file "$INTO_OUT" >/dev/null 2>&1 || true; fi
+}
+into_end() {  # into_end <media file> <kind> <prompt>
+  local res
+  res="$(python3 "$here/hf-into" add --project "$into" --file "$1" --kind "$2" --prompt "$3" \
+          ${into_args[@]+"${into_args[@]}"} ${into_add[@]+"${into_add[@]}"})" || {
+    local rc=$?; into_done=1; say "painted, but not mounted: $1 (fix the project, then: subpowers hf add --project \"$into\" --file \"$1\")"; exit $rc; }
+  into_done=1
+  if [[ -n "$into_user_out" ]]; then
+    mkdir -p "$(dirname "$into_user_out")"
+    cp "$1" "$into_user_out" && { [[ -f "${1%.*}.prompt.txt" ]] && cp "${1%.*}.prompt.txt" "${into_user_out%.*}.prompt.txt"; true; } \
+      || say "could not copy to $into_user_out; the layer and its media are in the project"
+  fi
+  echo "$res"
+}
+
+# --match-set VIDEO[@SECONDS] (2026-10-31, Luis: "use the same set that is on the video, so when we add or overlay an
+# image or a video, it literally feels organic"): a frame of the client's own footage with the people taken out
+# (bin/set-plate) becomes one more reference, and the prompt is told to paint on that set. The people are removed
+# because painters borrow faces from every reference; to put a real person in the shot, add their own --refs.
+MATCH_SET_TEXT="Shot on the same set as the reference plate (the set photo with the people blurred out): same lighting direction, colour temperature and contrast, same colour palette, lens, depth of field and grain, so it looks filmed in that room by that camera. Ignore the blurred patch in the plate; never copy it and never invent a person from it."
+set_plate() {
+  local dir="$HOME_DIR/plates"; mkdir -p "$dir"
+  local out="$dir/plate-$(date +%Y%m%d-%H%M%S)-$$-$RANDOM.png"
+  "$here/set-plate" "$1" "$out" | tail -n 1
+}
+
 cmd="${1:-help}"; [[ $# -gt 0 ]] && shift
 case "$cmd" in
   image|draw)
-    [[ $# -ge 2 ]] || usage
-    prompt="$1"; out="$2"; shift 2
-    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; args=()
+    [[ $# -ge 1 ]] || usage
+    prompt="$1"; shift; out=""
+    if [[ $# -gt 0 && "$1" != --* ]]; then out="$1"; shift; fi
+    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; args=(); has_size=""
     while [[ $# -gt 0 ]]; do
+      if into_opt "$@"; then shift "$INTO_EAT"; continue; fi
       case "$1" in
         --painter) [[ $# -ge 2 ]] || usage; painter="$(norm_painter "$2")"; shift 2 ;;
+        --size) [[ $# -ge 2 ]] || usage; has_size=1; args+=("$1" "$2"); shift 2 ;;
         --refs)
           [[ $# -ge 2 ]] || usage
           rf="$(ref_files "$2")" || exit 3
@@ -213,11 +293,28 @@ case "$cmd" in
         --ref)
           [[ $# -ge 2 ]] || usage
           args+=(--ref "$(small_ref "$2")"); shift 2 ;;
+        --match-set)
+          [[ $# -ge 2 ]] || usage
+          plate="$(set_plate "$2")" || { say "--match-set: no set plate from $2"; exit 3; }
+          args+=(--ref "$(small_ref "$plate")"); prompt="$prompt
+
+$MATCH_SET_TEXT"; shift 2 ;;
         *) args+=("$1"); shift ;;
       esac
     done
+    into_check
+    if [[ -n "$into" ]]; then
+      [[ "$painter" != all ]] || { say "--into mounts one image; pick a painter or leave auto (a council paints several)"; exit 2; }
+      into_user_out="$out"; ext="png"; [[ -n "$out" && "$out" == *.* ]] && ext="${out##*.}"
+      into_begin image "$ext" "$prompt"
+      [[ -n "$has_size" ]] || args+=(--size "$INTO_SIZE")
+      got="$(paint "$painter" "$prompt" "$INTO_OUT" ${args[@]+"${args[@]}"} | tail -n 1)" || exit $?
+      into_end "${got:-$INTO_OUT}" image "$prompt"
+      exit 0
+    fi
+    [[ -n "$out" ]] || usage
     case "$painter" in
-      auto|chatgpt|antigravity|grok) paint "$painter" "$prompt" "$out" ${args[@]+"${args[@]}"} ;;
+      auto|chatgpt|antigravity|grok|higgsfield) paint "$painter" "$prompt" "$out" ${args[@]+"${args[@]}"} ;;
       all)
         stem="${out%.*}"; ext="${out##*.}"; pids=(); labels=()
         export SUBPOWERS_BATCH="${SUBPOWERS_BATCH:-$(date +%Y%m%d-%H%M%S)-$$}"
@@ -235,7 +332,7 @@ case "$cmd" in
         contact_sheet "${stem}-all.jpg" "${items[@]}" >/dev/null
         if [[ -f "${stem}-all.jpg" ]]; then echo "${stem}-all.jpg"; fi
         ;;
-      *) say "unknown painter '$painter' (chatgpt, antigravity, grok, council)"; exit 2 ;;
+      *) say "unknown painter '$painter' (chatgpt, antigravity, grok, council, or higgsfield: opt-in, spends plan credits)"; exit 2 ;;
     esac
     ;;
   sheet)
@@ -286,11 +383,14 @@ Photorealistic, evenly spaced, no text, no labels, no watermark."
     if [[ -f "$outdir/storyboard.jpg" ]]; then echo "$outdir/storyboard.jpg"; else echo "$outdir"; fi
     ;;
   stopmotion|stop-motion)
-    [[ $# -ge 2 ]] || usage
-    concept="$1"; out="$2"; shift 2
-    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; frames=8; fps=6; style=""; size="1024x1024"
+    [[ $# -ge 1 ]] || usage
+    concept="$1"; shift; out=""
+    if [[ $# -gt 0 && "$1" != --* ]]; then out="$1"; shift; fi
+    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; frames=8; fps=6; style=""; size="1024x1024"; has_size=""
     chain=""; plan=""; audio=""; resume=""; refargs=()
     while [[ $# -gt 0 ]]; do
+      if into_opt "$@"; then shift "$INTO_EAT"; continue; fi
+      [[ "$1" == --size ]] && has_size=1
       case "$1" in
         --frames) [[ $# -ge 2 ]] || usage; frames="$2"; shift 2 ;;
         --fps) [[ $# -ge 2 ]] || usage; fps="$2"; shift 2 ;;
@@ -305,6 +405,15 @@ Photorealistic, evenly spaced, no text, no labels, no watermark."
         *) say "unknown stopmotion option: $1"; exit 2 ;;
       esac
     done
+    into_check
+    if [[ -n "$into" ]]; then
+      [[ -z "$resume" ]] || { say "--resume needs the same out path as the first run; with --into, run it again without --into, then: subpowers hf add"; exit 2; }
+      into_user_out="$out"
+      into_begin stopmotion mp4 "$concept"
+      out="$INTO_OUT"
+      [[ -n "$has_size" ]] || size="$INTO_SIZE"
+    fi
+    [[ -n "$out" ]] || usage
     [[ "$frames" =~ ^[0-9]+$ && $frames -ge 2 && $frames -le 24 ]] || { say "--frames is 2 to 24"; exit 2; }
     [[ "$fps" =~ ^[0-9]+$ && $fps -ge 1 && $fps -le 30 ]] || { say "--fps is 1 to 30"; exit 2; }
     [[ "$size" =~ ^[0-9]+x[0-9]+$ ]] || { say "--size must look like 1024x1024"; exit 2; }
@@ -439,6 +548,10 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
       i=0; for d in "${descs[@]}"; do i=$((i+1)); echo "$i. $d"; done
     } >"$stem.prompt.txt"
     for f in ${made[@]+"${made[@]}"}; do python3 "$here/library" add "$f" >/dev/null 2>&1 || true; done
+    if [[ -n "$into" ]]; then
+      [[ -n "$mp4ok" ]] || { into_done=1; say "no mp4 to mount (see above); the frames are in $fdir"; exit 1; }
+      into_end "$out" stopmotion "$concept"; exit 0
+    fi
     echo "$main"
     ;;
   refs)
@@ -463,9 +576,24 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     esac
     ;;
   video)
-    [[ $# -ge 2 ]] || usage
-    prompt="$1"; out="$2"; shift 2
-    vargs=(); has_src=""; aspect="16:9"; fpainter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"
+    [[ $# -ge 1 ]] || usage
+    prompt="$1"; shift; out=""
+    if [[ $# -gt 0 && "$1" != --* ]]; then out="$1"; shift; fi
+    vargs=(); has_src=""; aspect="16:9"; has_aspect=""; fpainter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"
+    # here --duration is the clip's own length (grok-video); the layer runs as long as the clip
+    pre=(); while [[ $# -gt 0 ]]; do
+      if [[ "$1" != --duration ]] && into_opt "$@"; then shift "$INTO_EAT"; else pre+=("$1"); shift; fi
+    done
+    set -- ${pre[@]+"${pre[@]}"}
+    into_check
+    if [[ -n "$into" ]]; then
+      into_user_out="$out"
+      into_begin video mp4 "$prompt"
+      out="$INTO_OUT"
+      for a in "$@"; do [[ "$a" == --aspect ]] && has_aspect=1; done
+      if [[ -z "$has_aspect" ]]; then aspect="$INTO_ASPECT"; vargs+=(--aspect "$aspect"); fi
+    fi
+    [[ -n "$out" ]] || usage
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --first|--last|--ref|--voice) [[ $# -ge 2 ]] || usage; has_src=1; vargs+=("$1" "$2"); shift 2 ;;
@@ -492,9 +620,11 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     fi
     got="$(bash "$here/grok-video" "$prompt" "$out" ${vargs[@]+"${vargs[@]}"})" || exit $?
     python3 "$here/library" add "$got" >/dev/null || true
+    if [[ -n "$into" ]]; then into_end "$got" video "$prompt"; exit 0; fi
     echo "$got"
     ;;
   think|plan) exec bash "$here/think" "$@" ;;
+  hf|hyperframes) exec python3 "$here/hf-into" "$@" ;;
   slideshow|slider) exec python3 "$here/slideshow" "$@" ;;
   library|lib) exec python3 "$here/library" "$@" ;;
   canary) exec python3 "$here/canary" "$@" ;;
@@ -502,6 +632,9 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
   powers)
     for p in $ORDER; do
       if has "$p"; then printf 'image  %-12s ON\n' "$p"; else printf 'image  %-12s OFF  (subpowers doctor shows how to connect it)\n' "$p"; fi
+    done
+    for p in $OPTIN; do
+      if has "$p"; then printf 'image  %-12s ON   (opt-in: --painter %s, spends plan credits)\n' "$p" "$p"; else printf 'image  %-12s OFF  (opt-in; higgsfield auth login)\n' "$p"; fi
     done
     ;;
   update)

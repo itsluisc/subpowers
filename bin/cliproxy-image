@@ -1,0 +1,187 @@
+#!/usr/bin/env python3
+"""Opt-in, loopback-only Antigravity OAuth image fallback. Not native AGY.
+
+Never install credentials, use Google API keys, retry a generation, or claim a
+model upgrade from a marketing name. The proxy must already be configured.
+"""
+import argparse
+import base64
+import hashlib
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+
+
+class Failure(Exception):
+    pass
+
+
+def loopback_url(url):
+    p = urllib.parse.urlsplit(url)
+    if (p.scheme != "http" or p.hostname not in ("127.0.0.1", "localhost", "::1")
+            or p.username or p.password or p.query or p.fragment or p.path not in ("", "/")):
+        raise Failure("AGY_IMAGE_PROXY_URL must be an HTTP loopback origin; refusing credential transmission")
+    return url.rstrip("/")
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        raise Failure("proxy redirect refused; credentials are loopback-only")
+
+
+def atomic(path, data):
+    fd, name = tempfile.mkstemp(prefix=".subpowers-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.replace(name, path)
+    finally:
+        if os.path.exists(name):
+            os.unlink(name)
+
+
+def image_bytes(url):
+    prefix, sep, encoded = url.partition(",")
+    if not sep or prefix not in ("data:image/png;base64", "data:image/jpeg;base64", "data:image/webp;base64"):
+        raise Failure("proxy returned no supported inline image; remote URLs are never fetched")
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except (ValueError, TypeError):
+        raise Failure("invalid image encoding")
+    signatures = {"png": data.startswith(b"\x89PNG\r\n\x1a\n"),
+                  "jpg": data.startswith(b"\xff\xd8\xff"),
+                  "webp": data.startswith(b"RIFF") and data[8:12] == b"WEBP"}
+    ext = next((k for k, v in signatures.items() if v), None)
+    if not ext or len(data) < 40:
+        raise Failure("invalid image signature")
+    return data, ext
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("prompt")
+    ap.add_argument("out", type=Path)
+    ap.add_argument("--size", default="")
+    ap.add_argument("--aspect", default="1:1")
+    ap.add_argument("--ref", action="append", default=[])
+    ap.add_argument("--driver", default="", help="ignored: no chat driver on this transport")
+    a = ap.parse_args()
+    out = a.out.expanduser().absolute()
+    if not a.prompt or out.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+        raise Failure("nonempty prompt and .png/.jpg output required")
+    if a.size:
+        try:
+            w, h = map(int, a.size.split("x"))
+            if min(w, h) <= 0 or max(w, h) > 16384:
+                raise ValueError()
+        except ValueError:
+            raise Failure("invalid --size")
+    origin = loopback_url(os.environ.get("AGY_IMAGE_PROXY_URL", "http://127.0.0.1:8317"))
+    keyfile = Path(os.environ.get("AGY_IMAGE_PROXY_KEY_FILE", "~/.cli-proxy-api/.local-key")).expanduser()
+    try:
+        key = keyfile.read_text().strip()
+    except OSError:
+        raise Failure("missing local proxy key file; configure the OAuth proxy separately")
+    if not key:
+        raise Failure("empty proxy key file")
+    timeout = float(os.environ.get("AGY_IMAGE_TIMEOUT", "180"))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+
+    def request(path, payload=None):
+        req = urllib.request.Request(origin + path, data=None if payload is None else json.dumps(payload).encode(),
+                                     headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+        try:
+            with opener.open(req, timeout=timeout) as response:
+                raw = response.read(64 * 1024 * 1024 + 1)
+                if len(raw) > 64 * 1024 * 1024:
+                    raise Failure("proxy response exceeded limit")
+                return json.loads(raw)
+        except urllib.error.HTTPError as e:
+            # Error bodies can contain prompt or credential material. Never log them.
+            raise Failure("proxy HTTP %s (no automatic generation retry)" % e.code)
+        except (urllib.error.URLError, TimeoutError):
+            raise Failure("proxy unreachable or timed out; generation outcome may be unknown, do not automatically retry")
+
+    models = request("/v1/models").get("data", [])
+    available = [m.get("id") for m in models if m.get("owned_by") == "antigravity"]
+    # Default is deliberately the verified ID, not a guessed 'latest' alias.
+    model = os.environ.get("AGY_PROXY_IMAGE_MODEL", "gemini-3.1-flash-image")
+    if model not in available:
+        raise Failure("requested image model is not exposed by the proxy's Antigravity OAuth provider; refusing downgrade")
+    content = [{"type": "text", "text": a.prompt}]
+    for r in a.ref:
+        p = Path(r).expanduser()
+        data = p.read_bytes()
+        ext = p.suffix.lower()
+        mime = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}.get(ext)
+        if not mime or len(data) > 20 * 1024 * 1024:
+            raise Failure("references must be PNG/JPEG/WebP, at most 20 MiB each")
+        content.append({"type": "image_url", "image_url": {"url": "data:%s;base64,%s" % (mime, base64.b64encode(data).decode())}})
+    out.parent.mkdir(parents=True, exist_ok=True)
+    stem = out.with_suffix("")
+    receipt = Path(str(stem) + ".generation.json")
+    if receipt.exists():
+        previous = json.loads(receipt.read_text())
+        if previous.get("state") == "submitted_outcome_unknown":
+            raise Failure("previous submission outcome is unknown; inspect that receipt before deliberately starting another generation")
+    state = {"schema": "subpowers-image@1", "transport": "cliproxy-antigravity-oauth-fallback",
+             "native_agy_fixed": False, "tool_executed": "HTTP /v1/chat/completions (not generate_image)",
+             "requested_model": model, "provider_observed_model": None, "output": str(out),
+             "started_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "state": "submitted_outcome_unknown"}
+    atomic(receipt, json.dumps(state, indent=2).encode())
+    t0 = time.monotonic()
+    result = request("/v1/chat/completions", {"model": model, "messages": [{"role": "user", "content": content}],
+                                             "stream": False, "image_config": {"aspect_ratio": a.aspect}})
+    message = result.get("choices", [{}])[0].get("message", {})
+    images = message.get("images", [])
+    if len(images) != 1:
+        raise Failure("expected exactly one inline image; outcome receipt kept, no automatic retry")
+    data, ext = image_bytes(images[0].get("image_url", {}).get("url", ""))
+    original = Path(str(stem) + ".original." + ext)
+    atomic(original, data)
+    # Once an image exists, exit 5 on delivery failure so auto never paints twice.
+    try:
+        imgops = str(Path(__file__).resolve().parent / "imgops")
+        if out.suffix.lower().lstrip(".").replace("jpeg", "jpg") == ext:
+            atomic(out, data)
+        else:
+            subprocess.run([sys.executable, imgops, "convert", str(original), str(out)], check=True, capture_output=True)
+        rawdims = subprocess.check_output([sys.executable, imgops, "dims", str(original)], text=True).strip()
+        if a.size:
+            subprocess.run([sys.executable, imgops, "resize", str(out), str(w), str(h)], check=True, capture_output=True)
+        dims = subprocess.check_output([sys.executable, imgops, "dims", str(out)], text=True).strip()
+        observed = result.get("model")
+        state.update(state="delivered", provider_observed_model=observed, original=str(original),
+                     native_dimensions=rawdims, delivered_dimensions=dims, seconds=round(time.monotonic()-t0, 2),
+                     sha256=hashlib.sha256(out.read_bytes()).hexdigest(),
+                     local_resize=bool(a.size), model_match=observed == model)
+        atomic(receipt, json.dumps(state, indent=2).encode())
+        text = ("PROMPT (as given and sent verbatim):\n%s\n\nprovenance:\n"
+                "  transport: labeled CLIProxy Antigravity OAuth fallback; NOT fixed native AGY\n"
+                "  requested model: %s\n  provider-observed model: %s\n"
+                "  tool executed: HTTP /v1/chat/completions, NOT generate_image\n"
+                "  native dimensions: %s\n  delivered dimensions: %s\n  local resize: %s\n"
+                "  receipt: %s\n") % (a.prompt, model, observed or "NOT_RECORDED", rawdims, dims, bool(a.size), receipt)
+        atomic(Path(str(stem) + ".prompt.txt"), text.encode())
+    except (OSError, subprocess.SubprocessError):
+        print("cliproxy-image: painted but delivery failed; signed/source bytes kept at " + str(original), file=sys.stderr)
+        return 5
+    print("cliproxy-image: FALLBACK; requested=%s observed=%s native=%s delivered=%s" % (model, observed or "NOT_RECORDED", rawdims, dims), file=sys.stderr)
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except (Failure, OSError, ValueError, KeyError, IndexError) as e:
+        # Never print raw provider objects or exception URLs/headers.
+        print("cliproxy-image: " + (str(e) if isinstance(e, Failure) else type(e).__name__), file=sys.stderr)
+        sys.exit(1)

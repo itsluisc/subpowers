@@ -25,9 +25,9 @@ mkpath() {  # mkpath DIR [stub...]: symlinks to the basic tools plus the named s
   for t in $tools; do p="$(type -P "$t" 2>/dev/null)" && ln -sf "$p" "$d/$t"; done
   for t in "$@"; do ln -sf "$stubs/$t" "$d/$t"; done
 }
-mkpath "$T/path" codex agy grok curl
+mkpath "$T/path" codex agy grok curl higgsfield
 if [[ -n "${SUBPOWERS_TEST_SIPS:-}" ]] && p="$(type -P sips)"; then ln -sf "$p" "$T/path/sips"; fi
-mkpath "$T/path-nosips" codex agy grok curl
+mkpath "$T/path-nosips" codex agy grok curl higgsfield
 mkpath "$T/path-noclis"
 mkdir -p "$T/nopil/PIL"
 echo 'raise ImportError("Pillow hidden by tests/run.sh")' >"$T/nopil/PIL/__init__.py"
@@ -146,7 +146,7 @@ else
 fi
 check "receipt" test -f "$C/out/fox.prompt.txt"
 check "one paint" paints 1 grok
-check "receipt labels the Imagine model as requested" has "$C/out/fox.prompt.txt" "^  image model requested: grok-imagine-image-quality"
+check "receipt labels the Imagine model as requested" has "$C/out/fox.prompt.txt" "^  image model requested: grok-imagine-image-2.0"
 check "receipt claims no answering model" hasnt "$C/out/fox.prompt.txt" "^  image model:"
 
 newcase "grok-video: a first frame becomes a clip"
@@ -645,10 +645,48 @@ newcase "image: an unknown painter lists the painter id"
 run bash "$bin/subpowers" image "a red mug" "$C/out/mug.png" --painter dalle
 check "exit 2" exits 2
 check "offers antigravity and council" has "$C/stderr" "chatgpt, antigravity, grok, council"
+check "names the opt-in painter" has "$C/stderr" "higgsfield: opt-in"
 newcase "image: google is an alias for antigravity"
 run bash "$bin/subpowers" image "a red mug" "$C/out/mug.png" --painter google
 check "exit 0" exits 0
 check "paints with agy" paints 1 agy
+
+echo "== higgsfield (opt-in, spends plan credits)"
+newcase "higgsfield: text to png, receipt names requested and observed model and credits"
+run bash "$bin/higgsfield-image" "a red mug" "$C/out/mug.png" --size 1600x900
+check "exit 0" exits 0
+check "prints the image path" printed "$C/out/mug.png"
+if [[ -n "$OPS" ]]; then check "png 1600x900" img "$C/out/mug.png" png 1600x900
+else check "png at the painter's 1376x768" img "$C/out/mug.png" png 1376x768; fi
+check "one paint" paints 1 higgsfield
+check "asked 16:9" has "$C/stub.log" '"--aspect_ratio", "16:9"'
+check "receipt: requested and observed model" has "$C/out/mug.prompt.txt" "image model requested: nano_banana_2_1 \\| job reports: nano_banana_2_1"
+check "receipt: credits estimate and balance" has "$C/out/mug.prompt.txt" "credits: estimated 1.5; balance 100.0 -> 98.5"
+newcase "higgsfield: a job that reports another model is flagged in the receipt"
+run STUB_HF_OBSERVED=nano_banana_2 bash "$bin/higgsfield-image" "a red mug" "$C/out/mug.png"
+check "exit 0" exits 0
+check "flags the difference" has "$C/out/mug.prompt.txt" "DIFFERENT from the request"
+newcase "higgsfield: over the credit cap refuses before painting"
+run STUB_HF_COST=9 bash "$bin/higgsfield-image" "a red mug" "$C/out/mug.png"
+check "exit 1" exits 1
+check "says the cap" has "$C/stderr" "over the cap"
+check "painted nothing" paints 0 higgsfield
+newcase "higgsfield: signed out is not connected"
+run STUB_HF_LOGGED_OUT=1 bash "$bin/higgsfield-image" "a red mug" "$C/out/mug.png"
+check "exit 3" exits 3
+check "says how to sign in" has "$C/stderr" "higgsfield auth login"
+newcase "auto never spends Higgsfield credits"
+run bash "$bin/subpowers" image "a red mug" "$C/out/mug.png"
+check "exit 0" exits 0
+check "higgsfield painted nothing" paints 0 higgsfield
+newcase "image --painter higgsfield paints on Higgsfield"
+run bash "$bin/subpowers" image "a red mug" "$C/out/mug.png" --painter higgsfield
+check "exit 0" exits 0
+check "one higgsfield paint" paints 1 higgsfield
+newcase "powers lists higgsfield as opt-in"
+run bash "$bin/subpowers" powers
+check "exit 0" exits 0
+check "opt-in line" has "$C/stdout" "higgsfield +ON +\\(opt-in"
 
 echo
 echo "$pass passed, $fail failed"

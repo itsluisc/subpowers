@@ -1,0 +1,127 @@
+#!/usr/bin/env python3
+"""Persistent Linux image jobs over SSH, using subpowers installed on that host.
+
+subpowers remote SSH_HOST image PROMPT [--painter chatgpt|antigravity|grok]
+subpowers remote SSH_HOST status JOB_ID
+subpowers remote SSH_HOST fetch JOB_ID /absolute/local/output.png
+
+No credentials are synced. No Mac media is mirrored. A systemd unit survives
+disconnect; status + fetch recover the same job without painting it again.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+import uuid
+
+RUNNER = '''import hashlib,json,os,pathlib,subprocess,sys,time
+p=pathlib.Path(sys.argv[1]); j=json.loads((p/'input.json').read_text()); out=p/'image.png'
+def state(value,**extra):
+ t=p/'status.tmp'; t.write_text(json.dumps(dict(job_id=p.name,state=value,**extra))); t.replace(p/'status.json')
+state('running')
+env=dict(os.environ); env['PATH']=str(pathlib.Path.home()/'.local/bin')+':'+env.get('PATH','')
+env['HOME']=str(pathlib.Path.home())
+env['SUBPOWERS_NO_AUTOUPDATE']='1'
+for k,v in j.get('env',{}).items(): env[k]=v
+with (p/'stdout.log').open('w') as o,(p/'stderr.log').open('w') as e:
+ try:
+  r=subprocess.run([j['door'],'image',j['prompt'],str(out),'--painter',j['painter']],env=env,stdout=o,stderr=e,timeout=900)
+  ok=r.returncode==0 and out.is_file() and out.stat().st_size>40
+  state('delivered' if ok else 'failed',exit_code=r.returncode,output=str(out) if ok else None,
+        sha256=hashlib.sha256(out.read_bytes()).hexdigest() if ok else None)
+ except Exception as ex: state('outcome_unknown',error=type(ex).__name__)
+'''
+
+PREPARE = '''import json,os,pathlib,shutil,subprocess,sys
+j=json.load(sys.stdin); p=pathlib.Path.home()/'.subpowers/jobs'/j['job_id']; p.mkdir(parents=True,mode=0o700)
+door=shutil.which('subpowers') or str(pathlib.Path.home()/'.local/bin/subpowers')
+if not pathlib.Path(door).is_file(): raise SystemExit('subpowers not installed on remote host')
+j['door']=door
+(p/'input.json').write_text(json.dumps(j)); (p/'runner.py').write_text(j.pop('runner'))
+(p/'status.json').write_text(json.dumps(dict(job_id=p.name,state='launching')))
+cmd=['systemd-run']+([] if os.geteuid()==0 else ['--user'])+['--quiet','--collect','--unit=subpowers-'+p.name,
+     '--property=MemoryMax=1500M','--property=CPUQuota=100%','--property=RuntimeMaxSec=960',
+     sys.executable,str(p/'runner.py'),str(p)]
+r=subprocess.run(cmd,capture_output=True,text=True)
+if r.returncode:
+ (p/'status.json').write_text(json.dumps(dict(job_id=p.name,state='launch_failed')))
+ raise SystemExit('systemd job launch failed; job ID retained, check remote systemd access')
+print(json.dumps(dict(job_id=p.name,state='submitted',remote_dir=str(p))))
+'''
+
+STATUS = '''import json,pathlib,subprocess,sys,os
+p=pathlib.Path.home()/'.subpowers/jobs'/sys.argv[1]; j=json.loads((p/'status.json').read_text())
+if j['state'] in ('launching','running'):
+ cmd=['systemctl']+([] if os.geteuid()==0 else ['--user'])+['is-active','subpowers-'+p.name]
+ if subprocess.run(cmd,capture_output=True).returncode: j['state']='outcome_unknown'
+print(json.dumps(j))
+'''
+
+
+def ssh(host, code, args=(), payload=None):
+    cmd = 'python3 -c ' + shlex.quote(code) + ''.join(' ' + shlex.quote(x) for x in args)
+    r = subprocess.run(['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=12', host, cmd],
+                       input=None if payload is None else json.dumps(payload), text=True, capture_output=True, timeout=35)
+    if r.returncode:
+        raise RuntimeError(r.stderr.strip() or 'remote command failed')
+    return json.loads(r.stdout)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument('host')
+    sub = ap.add_subparsers(dest='cmd', required=True)
+    image = sub.add_parser('image')
+    image.add_argument('prompt')
+    image.add_argument('--painter', choices=['chatgpt','antigravity','grok'], default='chatgpt')
+    for name in ('status','fetch'):
+        p = sub.add_parser(name); p.add_argument('job_id')
+        if name == 'fetch': p.add_argument('out', type=Path)
+    a = ap.parse_args()
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*', a.host):
+        raise RuntimeError('host must be an SSH alias or user@host, never SSH options')
+    if a.cmd == 'image':
+        job = uuid.uuid4().hex
+        print('job_id=' + job + ' (retain this ID even if SSH disconnects)', file=sys.stderr, flush=True)
+        env = {k: os.environ[k] for k in ('AGY_IMAGE_TRANSPORT','AGY_PROXY_IMAGE_MODEL') if k in os.environ}
+        print(json.dumps(ssh(a.host, PREPARE, payload=dict(job_id=job,prompt=a.prompt,painter=a.painter,env=env,runner=RUNNER))))
+        return
+    if not re.fullmatch(r'[0-9a-f]{32}', a.job_id):
+        raise RuntimeError('invalid job ID')
+    status = ssh(a.host, STATUS, (a.job_id,))
+    if a.cmd == 'status':
+        print(json.dumps(status)); return
+    if status.get('state') != 'delivered':
+        raise RuntimeError('job not delivered: ' + status.get('state', 'unknown') + '; never resubmit an unknown outcome')
+    out = a.out.expanduser().absolute()
+    if out.suffix.lower() != '.png':
+        raise RuntimeError('fetch output must end in .png')
+    out.parent.mkdir(parents=True, exist_ok=True)
+    remote = status['output']
+    if not re.fullmatch(r'/[A-Za-z0-9_./-]+', remote) or not remote.endswith('/' + a.job_id + '/image.png'):
+        raise RuntimeError('invalid remote delivery path')
+    subprocess.run(['scp','-q',a.host+':'+remote,str(out)],check=True,timeout=60)
+    data = out.read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    if not data.startswith(b'\x89PNG\r\n\x1a\n') or len(data) < 40:
+        raise RuntimeError('fetched output is not a PNG; retained for inspection, not delivered')
+    if status.get('sha256') and digest != status['sha256']:
+        raise RuntimeError('fetched PNG does not match the remote delivery digest')
+    # Provenance stays beside the fetched image. Missing receipt is a delivery failure.
+    subprocess.run(['scp','-q',a.host+':'+remote[:-4]+'.prompt.txt',str(out.with_suffix('.prompt.txt'))],check=True,timeout=30)
+    status['local_output'] = str(out)
+    status['local_sha256'] = digest
+    status['digest_match'] = digest == status.get('sha256') if status.get('sha256') else None
+    out.with_suffix('.remote.json').write_text(json.dumps(status,indent=2))
+    print(out)
+
+
+if __name__ == '__main__':
+    try: main()
+    except (RuntimeError, OSError, ValueError, subprocess.SubprocessError) as e:
+        print('subpowers remote: ' + str(e), file=sys.stderr); sys.exit(1)
