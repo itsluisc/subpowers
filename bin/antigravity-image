@@ -204,13 +204,19 @@ import re, sys
 effort = sys.argv[1]
 ids = [l.split("\t")[0].strip() for l in sys.stdin if l.startswith("gemini-")]
 flash = {}
+hydro = {}
 for i in ids:
     m = re.fullmatch(r"gemini-(\d+(?:\.\d+)*)-flash-(low|medium|high)", i)
     if m: flash.setdefault(tuple(int(x) for x in m.group(1).split(".")), {})[m.group(2)] = i
+    m4 = re.fullmatch(r"gemini-(\d+(?:\.\d+)*)-hydrogen-(low|medium|high)", i)
+    if m4: hydro.setdefault(tuple(int(x) for x in m4.group(1).split(".")), {})[m4.group(2)] = i
 chain = []
 for v in sorted(flash, reverse=True)[:2]:
     pick = flash[v].get(effort) or flash[v].get("high") or next(iter(flash[v].values()))
     chain.append(pick)
+for v in sorted(hydro, reverse=True)[:1]:
+    pick = hydro[v].get(effort) or hydro[v].get("high") or next(iter(hydro[v].values()))
+    if pick not in chain: chain.append(pick)
 chain.append("default")
 print(":".join(chain))
 ' "$effort")"

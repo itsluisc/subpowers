@@ -3,19 +3,23 @@
 # `higgsfield` CLI (browser sign-in, no API key). Same contract as grok-video and higgsfield-image.
 #
 # HOW IT WORKS (higgsfield 1.2.2):
-#   model    default seedance_2_5 (supports text-to-video and omni_reference with up to 30 images,
-#            audio, start/end frames). Also works with seedance_2_0, kling4_0, veo3_1, grok_video_v15,
-#            minimax_h3, and any job_type listed by `higgsfield model list --video`.
+#   models   seedance_2_5 (default; t2v + omni_reference with up to 30 images, video & audio refs),
+#            gemini_omni_flash_1_2 (Google Gemini Omni 1.2 Flash: text-to-video, image-to-video,
+#            reference-to-video omni ref, edit, extend; ~18 cr), intone (Higgsfield Intone:
+#            --character IMG + --location IMG + --audio FILE 2-30s -> 1080p talking avatar in room),
+#            veo3_1 (~32 cr), kling4_0, grok_video_v15, minimax_h3.
 #   cost     Higgsfield spends plan CREDITS per video. Before generating, `higgsfield generate cost`
 #            prices the job; above HIGGSFIELD_VIDEO_MAX_CREDITS (default 40) it refuses and spends
 #            nothing. Note: Higgsfield gates free-unlimited (use_unlim) to web / Claude chat /
 #            Claude Cowork / ChatGPT; CLI runs spend plan credits transparently.
 #
 # Usage:
-#   higgsfield-video "<prompt>" <out.mp4> [--model JOB_TYPE] [--first IMG] [--last IMG]
-#                    [--ref IMG]... [--duration S] [--aspect R] [--resolution RES] [--no-audio]
+#   higgsfield-video "<prompt>" <out.mp4> [--model JOB_TYPE] [--mode MODE] [--first IMG] [--last IMG]
+#                    [--ref IMG|VID]... [--audio FILE]... [--character IMG] [--location IMG]
+#                    [--duration S] [--aspect R] [--resolution RES] [--no-audio]
 #
 # Env: HIGGSFIELD_VIDEO_MODEL (default seedance_2_5), HIGGSFIELD_VIDEO_MAX_CREDITS (default 40),
+#      HIGGSFIELD_INTONE_MAX_CREDITS (default 120, used only when --model intone),
 #      HIGGSFIELD_VIDEO_RESOLUTION (optional), HIGGSFIELD_VIDEO_TIMEOUT (seconds, default 1200).
 #
 # Exit: 0 delivered, 1 failed before billing, 2 usage, 3 not connected, 5 submitted/paid but not delivered.
@@ -29,7 +33,7 @@ here="$(cd "$(dirname "$src")" && pwd)"
 cfg="${SUBPOWERS_HOME:-$HOME/.subpowers}/config"
 if [[ -f "$cfg" ]]; then
   while IFS='=' read -r k v || [[ -n "$k" ]]; do
-    case "$k" in HIGGSFIELD_VIDEO_MODEL|HIGGSFIELD_VIDEO_MAX_CREDITS|HIGGSFIELD_VIDEO_TIMEOUT|HIGGSFIELD_VIDEO_RESOLUTION)
+    case "$k" in HIGGSFIELD_VIDEO_MODEL|HIGGSFIELD_VIDEO_MAX_CREDITS|HIGGSFIELD_INTONE_MAX_CREDITS|HIGGSFIELD_VIDEO_TIMEOUT|HIGGSFIELD_VIDEO_RESOLUTION)
       v="${v%\"}"; v="${v#\"}"
       [[ -z "${!k:-}" ]] && export "$k=$v" ;; esac
   done <"$cfg"
@@ -41,26 +45,31 @@ import json, math, os, re, shutil, subprocess, sys, tempfile, time, urllib.reque
 me = "higgsfield-video"
 def say(*a): print(f"{me}:", *a, file=sys.stderr)
 def usage():
-    say('usage: higgsfield-video "<prompt>" <out.mp4> [--model JOB_TYPE] [--first IMG] [--last IMG] [--ref IMG]... [--duration S] [--aspect R] [--resolution RES] [--no-audio]')
+    say('usage: higgsfield-video "<prompt>" <out.mp4> [--model JOB_TYPE] [--mode MODE] [--first IMG] [--last IMG] [--ref IMG|VID]... [--audio FILE]... [--character IMG] [--location IMG] [--duration S] [--aspect R] [--resolution RES] [--no-audio]')
     sys.exit(2)
 
 argv = sys.argv[1:]
 if len(argv) < 2: usage()
 prompt, out = argv[0], argv[1]
 model = os.environ.get("HIGGSFIELD_VIDEO_MODEL") or "seedance_2_5"
-first = last = aspect = duration = None
+mode_override = first = last = aspect = duration = character = location = None
 resolution = os.environ.get("HIGGSFIELD_VIDEO_RESOLUTION") or None
 refs = []
+audios = []
 no_audio = False
 i = 2
 while i < len(argv):
     a = argv[i]
-    if a in ("--model", "--first", "--last", "--ref", "--duration", "--aspect", "--resolution", "--driver") and i + 1 < len(argv):
+    if a in ("--model", "--mode", "--first", "--last", "--ref", "--audio", "--character", "--location", "--duration", "--aspect", "--resolution", "--driver") and i + 1 < len(argv):
         v = argv[i + 1]
         if a == "--model": model = v
+        elif a == "--mode": mode_override = v
         elif a == "--first": first = v
         elif a == "--last": last = v
         elif a == "--ref": refs.append(v)
+        elif a == "--audio": audios.append(v)
+        elif a == "--character": character = v
+        elif a == "--location": location = v
         elif a == "--duration": duration = v
         elif a == "--aspect": aspect = v
         elif a == "--resolution": resolution = v
@@ -72,13 +81,15 @@ while i < len(argv):
     else:
         say(f"unknown arg: {a}"); usage()
 
-if not prompt.strip():
+if not prompt.strip() and model != "intone":
     say("empty prompt"); sys.exit(2)
-for p in [first, last, *refs]:
+for p in [first, last, character, location, *refs, *audios]:
     if p and not os.path.isfile(p):
         say(f"missing media file: {p}"); sys.exit(2)
 
-cap = float(os.environ.get("HIGGSFIELD_VIDEO_MAX_CREDITS") or 40)
+cap_env = "HIGGSFIELD_INTONE_MAX_CREDITS" if model == "intone" else "HIGGSFIELD_VIDEO_MAX_CREDITS"
+cap_default = 120 if model == "intone" else 40
+cap = float(os.environ.get(cap_env) or cap_default)
 tmo = int(os.environ.get("HIGGSFIELD_VIDEO_TIMEOUT") or 1200)
 hf = shutil.which("higgsfield")
 if not hf:
@@ -123,16 +134,57 @@ try:
 except Exception as e:
     say(f"Higgsfield does not list video model '{model}' ({e}). See: higgsfield model list --video"); sys.exit(2)
 
-has_media = bool(first or last or refs)
-job = ["--prompt", prompt]
+job = []
+if prompt.strip():
+    job += ["--prompt", prompt]
+elif "prompt" in params and params["prompt"].get("required"):
+    say("empty prompt"); sys.exit(2)
 
-# Honor mode rules (e.g. seedance_2_5 requires mode=omni_reference when media is attached, t2v otherwise).
+# Intone special contract: CLI auto-uploads --image-references (exactly 2: character then location) + --audio-references (2-30s).
+if model == "intone":
+    if character or location:
+        if not (character and location):
+            say("intone via CLI requires BOTH --character IMG and --location IMG (or pass 2 --ref images: character then location)"); sys.exit(2)
+        if refs:
+            say("intone: pass either --character + --location OR two --ref images, not both"); sys.exit(2)
+        refs = [character, location]
+    if len(refs) != 2:
+        say("intone requires exactly 2 images: --character IMG and --location IMG (or 2 --ref images: character then location)"); sys.exit(2)
+    if not audios:
+        say("intone requires at least one --audio FILE (2 to 30 seconds of speech)"); sys.exit(2)
+elif character or location:
+    say("--character and --location are Intone flags (pass --model intone or use `subpowers intone`)"); sys.exit(2)
+
+has_vid_refs = any(os.path.splitext(r)[1].lower() in (".mp4", ".mov", ".webm") for r in refs)
+has_img_refs = any(os.path.splitext(r)[1].lower() not in (".mp4", ".mov", ".webm") for r in refs)
+has_media = bool(first or last or refs or audios)
+
+# Honor model mode contracts (Seedance t2v/omni_reference; Gemini Omni Flash 1.2 text/image/reference/edit/extend).
 if "mode" in params:
     mode_enum = params["mode"].get("enum") or []
-    if has_media and "omni_reference" in mode_enum:
-        job += ["--mode", "omni_reference"]
-    elif not has_media and "t2v" in mode_enum:
-        job += ["--mode", "t2v"]
+    if mode_override:
+        if mode_enum and mode_override not in mode_enum:
+            say(f"--mode must be one of {' '.join(mode_enum)} for {model}"); sys.exit(2)
+        chosen_mode = mode_override
+    elif "omni_reference" in mode_enum:
+        chosen_mode = "omni_reference" if has_media else "t2v"
+    elif "reference-to-video" in mode_enum:
+        if (first or last) and refs:
+            say(f"{model} cannot combine --first/--last keyframes with --ref references; pick one mode"); sys.exit(2)
+        if first:
+            chosen_mode = "image-to-video"
+        elif last:
+            say(f"{model} requires --first when using --last"); sys.exit(2)
+        elif refs:
+            chosen_mode = "reference-to-video"
+        else:
+            chosen_mode = "text-to-video"
+    else:
+        chosen_mode = params["mode"].get("default")
+    if chosen_mode:
+        job += ["--mode", chosen_mode]
+elif mode_override:
+    say(f"model '{model}' does not accept --mode"); sys.exit(2)
 
 if aspect:
     if "aspect_ratio" not in params:
@@ -173,17 +225,21 @@ for r in refs:
         job += ["--image-references", os.path.abspath(r)]
     else:
         say(f"model '{model}' does not accept --ref media input"); sys.exit(2)
+for a_file in audios:
+    if "audio_references" not in params:
+        say(f"model '{model}' does not accept --audio input"); sys.exit(2)
+    job += ["--audio-references", os.path.abspath(a_file)]
 
 try:
     est = float(cli("generate", "cost", model, *job, timeout=120).get("credits"))
 except Exception as e:
     say(f"could not price the video job ({e})"); sys.exit(1)
 if not math.isfinite(cap) or cap < 0:
-    say(f"invalid HIGGSFIELD_VIDEO_MAX_CREDITS={cap}"); sys.exit(2)
+    say(f"invalid {cap_env}={cap}"); sys.exit(2)
 if not math.isfinite(est) or est < 0:
     say(f"invalid credit quote from Higgsfield ({est}); refusing to spend"); sys.exit(1)
 if est > cap:
-    say(f"{model} would cost {est} credits, over the cap of {cap} (HIGGSFIELD_VIDEO_MAX_CREDITS). Nothing was spent."); sys.exit(1)
+    say(f"{model} would cost {est} credits, over the cap of {cap} ({cap_env}). Nothing was spent."); sys.exit(1)
 if before is not None and float(before) < est:
     say(f"dry (quota): {before} credits left, the video needs {est}."); sys.exit(1)
 
@@ -207,7 +263,6 @@ except Exception:
 done = [j for j in jobs if isinstance(j, dict) and j.get("status") == "completed" and j.get("result_url")]
 if r.returncode != 0 or not done:
     tail = (r.stderr or r.stdout or "").strip()[-400:]
-    # Billing safety: if a job id was already created (queued/in_progress/timed out), exit 5 so callers never double-pay.
     pending_ids = [str(j["id"]) for j in jobs if isinstance(j, dict) and j.get("id") and j.get("status") not in ("failed", "canceled", "cancelled", "rejected")]
     if not pending_ids and any(k in tail.lower() for k in ("timeout", "timed out", "still running", "in_progress", "queued")):
         pending_ids = extract_job_ids((r.stdout or "") + "\n" + (r.stderr or ""))
@@ -238,7 +293,7 @@ try:
         f"  video model requested: {model} | job reports: {observed} ({j.get('display_name', '?')})"
         + ("" if observed == model else "  <- DIFFERENT from the request"),
         f"  job id: {j.get('id')} | aspect: {aspect or 'default'} | duration: {duration or 'default'} | resolution: {resolution or 'default'}",
-        f"  first: {first or 'none'} | last: {last or 'none'} | references: {len(refs)}",
+        f"  first: {first or 'none'} | last: {last or 'none'} | references: {len(refs)} | audio: {len(audios)}",
         f"  credits: estimated {est}; balance {before} -> {after}" + (f" (spent {spent})" if spent is not None else ""),
         f"  timings: generate {gen_s}s, total {round(time.time() - t0)}s",
         f"  delivered: {out}",

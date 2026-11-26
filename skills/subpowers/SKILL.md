@@ -23,11 +23,12 @@ Before painting from scratch, check whether the user wants to point the visual a
 ## Commands
 
 ```bash
-subpowers image "<prompt>" /abs/out.png [--painter chatgpt|antigravity|grok|council|higgsfield] [--with-higgsfield] [--size WxH] [--ref photo.jpg]... [--refs NAME] [--soul-id NAME]
+subpowers image "<prompt>" /abs/out.png [--painter chatgpt|antigravity|grok|council|higgsfield] [--with-higgsfield] [--size WxH] [--ref photo.jpg]... [--refs NAME] [--soul-id NAME] [--cinematic]
 subpowers avatar NAME|--from photo.jpg /abs/sheet.png [--painter council] [--style photoreal|3d-toon]
-subpowers soul list | get NAME | create NAME p1.jpg p2.jpg p3.jpg p4.jpg p5.jpg [--wait]
+subpowers soul list | get NAME | create NAME p1.jpg p2.jpg p3.jpg p4.jpg p5.jpg [--cinematic] [--wait]
+subpowers intone /abs/talk.mp4 --character me.jpg --location room.jpg --audio voice.wav [--aspect 9:16] [--resolution 1080p]
 subpowers refs add NAME photo1.jpg photo2.heic ...     # save a reference set once (a person, room, product, world)
-subpowers video "<prompt>" /abs/out.mp4 [--painter grok|higgsfield] [--model seedance_2_5] [--first IMG] [--refs NAME] [--duration 1-15] [--aspect 16:9|9:16]
+subpowers video "<prompt>" /abs/out.mp4 [--painter grok|higgsfield] [--model seedance_2_5|gemini_omni_flash_1_2|veo3_1|kling4_0] [--first IMG] [--ref IMG|VID]... [--audio FILE]... [--refs NAME] [--duration 1-15] [--aspect 16:9|9:16]
 subpowers storyboard shots.txt /abs/outdir [--refs NAME] [--painter P] [--style "..."]
 subpowers powers      # connected subscriptions, video engines, and MCP readiness
 subpowers doctor      # live-checks every painter and names the exact fix
@@ -50,9 +51,10 @@ subpowers --version   # installed version
 
 ### Honest Higgsfield Credit & Unlimited Rules
 - `auto` and default `council` **never** spend Higgsfield credits. Opt in explicitly with `--painter higgsfield`, `--soul-id`, `--with-higgsfield`, or `SUBPOWERS_COUNCIL_PAINTERS` in `~/.subpowers/config`.
-- Every Higgsfield image or video call prices the job first (`higgsfield generate cost`), refuses above `HIGGSFIELD_IMAGE_MAX_CREDITS` (default `2`) or `HIGGSFIELD_VIDEO_MAX_CREDITS` (default `40`), and logs estimated + actual balance before/after in the receipt.
-- **Unlimited note:** Higgsfield gates free-unlimited (`use_unlim`) server-side to `higgsfield.ai` web, Claude chat, Claude Cowork, and ChatGPT. Calls through the `higgsfield` CLI or third-party MCP hosts spend plan credits transparently (Soul 2.0 `text2image_soul_v2` is only `0.12` credits). Never spoof client headers or claim CLI runs are free.
-- **Multi-ref vs Soul 2.0 on Higgsfield:** When combining multiple real room/environment + portrait `--ref` photos on Higgsfield, use `--model nano_banana_2_1` (or `gpt_image_2_6`), which accepts multiple references together. Reserve `text2image_soul_v2 --soul-id` for zero-ref text staging (or a composition ref that already contains a person), because passing an empty-room `--ref` locks Soul 2.0 onto an empty room.
+- Every Higgsfield image or video call prices the job first (`higgsfield generate cost`), refuses above `HIGGSFIELD_IMAGE_MAX_CREDITS` (default `2`), `HIGGSFIELD_VIDEO_MAX_CREDITS` (default `40`), or `HIGGSFIELD_INTONE_MAX_CREDITS` (default `120` for Intone ~96 cr), and logs estimated + actual balance before/after in the receipt.
+- **Unlimited note:** Higgsfield gates free-unlimited (`use_unlim`) server-side to `higgsfield.ai` web, Claude chat, Claude Cowork, and ChatGPT. Calls through the `higgsfield` CLI or third-party MCP hosts spend plan credits transparently (Soul 2.0 `text2image_soul_v2` and Soul Cinematic `soul_cinematic` are only `0.12` credits). Never spoof client headers or claim CLI runs are free.
+- **Multi-ref vs Soul 2.0 / Soul Cinematic on Higgsfield:** When combining multiple real room/environment + portrait `--ref` photos on Higgsfield, use `--model nano_banana_2_1` (or `gpt_image_2_6`), which accepts multiple references together. Reserve `text2image_soul_v2` / `--cinematic` (`soul_cinematic`, `21:9` anamorphic) with `--soul-id` for zero-ref text staging or a composition ref that already contains a person (an empty-room `--ref` locks Soul onto an empty room).
+- **Omni Reference & Intone Video:** Use `--painter higgsfield --model gemini_omni_flash_1_2` (~18 cr; auto-routes `text-to-video`, `image-to-video`, `reference-to-video` omni ref, `edit`, `extend`) or `--model seedance_2_5` (~35 cr; `omni_reference` with `--ref` images/videos + `--audio` VO/rhythm). Use `subpowers intone out.mp4 --character IMG --location IMG --audio VOICE.wav` (~96 cr, audio 2-30s) for a 1080p talking avatar placed directly inside a real room photo. Note: Google AI Ultra's native Flow `@Character` / `@me` / 15s Omni live in the web UI (`labs.google/fx/tools/flow` and `gemini.google.com`), not yet in the `agy` CLI (`agy` gives Gemini 4 text/planning + Nano Banana 2 images).
 
 ## Avatars, Character Sheets & Soul IDs (`#3A3A3C` Neutral Gray Rule)
 

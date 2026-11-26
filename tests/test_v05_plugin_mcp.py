@@ -286,6 +286,46 @@ class SubpowersV05Tests(unittest.TestCase):
         self.assertEqual(r9.returncode, 2)
         self.assertIn("require --with-higgsfield", r9.stderr)
 
+    def test_soul_cinematic_gemini_omni_and_intone(self):
+        # 1) --cinematic routes to soul_cinematic with Soul ID
+        cin = os.path.join(self.out, "cin.png")
+        rc = self.run_sp("image", "anamorphic film still at dusk", cin, "--soul-id", "Demo Creator", "--cinematic")
+        self.assertEqual(rc.returncode, 0, rc.stderr)
+        with open(os.path.join(self.out, "cin.prompt.txt")) as f:
+            self.assertIn("image model requested: soul_cinematic", f.read())
+
+        # 2) Google Gemini Omni Flash 1.2 auto-routes reference-to-video and blocks mixed keyframe+ref
+        ref_img = os.path.join(self.tmp, "char.png")
+        loc_img = os.path.join(self.tmp, "room.png")
+        wav = os.path.join(self.tmp, "voice.wav")
+        fakeimg.png(ref_img, 800, 1000)
+        fakeimg.png(loc_img, 800, 1000)
+        with open(wav, "wb") as f:
+            f.write(b"RIFF\x24\x00\x00\x00WAVEfmt ")
+
+        omni_out = os.path.join(self.out, "omni.mp4")
+        ro = self.run_sp("video", "turns to camera", omni_out, "--painter", "higgsfield", "--model", "gemini_omni_flash_1_2", "--ref", ref_img)
+        self.assertEqual(ro.returncode, 0, ro.stderr)
+        with open(self.stub_log) as f:
+            self.assertIn('"--mode", "reference-to-video"', f.read())
+        ro_bad = self.run_sp("video", "mix", omni_out, "--painter", "higgsfield", "--model", "gemini_omni_flash_1_2", "--first", ref_img, "--ref", loc_img)
+        self.assertEqual(ro_bad.returncode, 2)
+
+        # 3) Higgsfield Intone: requires character + location + audio; honors HIGGSFIELD_INTONE_MAX_CREDITS (120 default vs 96 cost)
+        with open(os.path.join(self.home, ".stub-higgsfield-credits"), "w") as f:
+            f.write("200.0")
+        intone_out = os.path.join(self.out, "talk.mp4")
+        ri_bad = self.run_sp("intone", intone_out, "--character", ref_img, "--audio", wav)
+        self.assertEqual(ri_bad.returncode, 2)
+        self.assertIn("BOTH --character", ri_bad.stderr)
+        ri_ok = self.run_sp("intone", intone_out, "--character", ref_img, "--location", loc_img, "--audio", wav, "--aspect", "9:16")
+        self.assertEqual(ri_ok.returncode, 0, ri_ok.stderr)
+        self.assertTrue(os.path.isfile(intone_out))
+        with open(self.stub_log) as f:
+            slog = f.read()
+            self.assertIn('"--audio-references"', slog)
+            self.assertIn('"--image-references"', slog)
+
     def test_council_with_higgsfield_and_default_safety(self):
         # Default council must NOT invoke higgsfield
         out1 = os.path.join(self.out, "c3.png")

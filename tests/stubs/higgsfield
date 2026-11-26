@@ -39,14 +39,34 @@ elif a[:2] == ["model", "get"]:
     if m in ("nano_banana_2_1", "gpt_image_2_6"):
         print(json.dumps({"job_type": m, "params": [
             {"name": "aspect_ratio", "enum": ASPECTS}, {"name": "prompt"}, {"name": "resolution", "enum": ["1k", "2k"]}]}))
-    elif m == "text2image_soul_v2":
+    elif m in ("text2image_soul_v2", "soul_cinematic"):
         print(json.dumps({"job_type": m, "params": [
-            {"name": "aspect_ratio", "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]},
+            {"name": "aspect_ratio", "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"]},
             {"name": "prompt"},
             {"name": "custom_reference_id"},
             {"name": "style_id"},
             {"name": "image_references"},
             {"name": "quality", "default": "2k", "enum": ["1.5k", "2k"]},
+        ]}))
+    elif m == "gemini_omni_flash_1_2":
+        print(json.dumps({"job_type": m, "type": "video", "params": [
+            {"name": "aspect_ratio", "enum": ["16:9", "9:16"]},
+            {"name": "prompt", "required": True},
+            {"name": "mode", "required": True, "enum": ["text-to-video", "image-to-video", "reference-to-video", "edit", "extend"]},
+            {"name": "duration", "default": 8},
+            {"name": "resolution", "default": "720p", "enum": ["360p", "720p", "1080p", "4k"]},
+            {"name": "start_image"},
+            {"name": "end_image"},
+            {"name": "image_references"},
+            {"name": "video_references"},
+        ]}))
+    elif m == "intone":
+        print(json.dumps({"job_type": m, "type": "video", "params": [
+            {"name": "aspect_ratio", "enum": ["21:9", "16:9", "9:16", "1:1", "4:3", "3:4"]},
+            {"name": "prompt", "required": False},
+            {"name": "resolution", "default": "1080p", "enum": ["480p", "720p", "1080p"]},
+            {"name": "image_references"},
+            {"name": "audio_references"},
         ]}))
     elif m in ("seedance_2_5", "kling4_0"):
         print(json.dumps({"job_type": m, "type": "video", "params": [
@@ -60,6 +80,7 @@ elif a[:2] == ["model", "get"]:
             {"name": "end_image"},
             {"name": "image_references"},
             {"name": "video_references"},
+            {"name": "audio_references"},
         ]}))
     elif m == "kling4_0_no_end":
         print(json.dumps({"job_type": m, "type": "video", "params": [
@@ -73,8 +94,12 @@ elif a[:2] == ["generate", "cost"]:
     m = a[2]
     if "STUB_HF_COST" in os.environ:
         c = COST
-    elif m == "text2image_soul_v2":
+    elif m in ("text2image_soul_v2", "soul_cinematic"):
         c = 0.12
+    elif m == "gemini_omni_flash_1_2":
+        c = 18.0
+    elif m == "intone":
+        c = 96.0
     elif m in ("seedance_2_5", "kling4_0"):
         c = 35.0
     else:
@@ -82,17 +107,18 @@ elif a[:2] == ["generate", "cost"]:
     print(json.dumps({"credits": c}))
 elif a[:2] == ["generate", "create"]:
     model = a[2]
-    if model == "text2image_soul_v2":
+    if model in ("text2image_soul_v2", "soul_cinematic"):
         q = _stub.arg("--quality")
         if q and q not in ("1.5k", "2k"):
             print(f"Error: invalid quality {q}", file=sys.stderr); sys.exit(1)
-    if model in ("seedance_2_5", "kling4_0"):
+    if model in ("seedance_2_5", "kling4_0", "gemini_omni_flash_1_2", "intone"):
         mode = _stub.arg("--mode") or "t2v"
-        has_media = any(flag in a for flag in ("--start-image", "--end-image", "--image-references", "--video-references"))
-        if mode == "t2v" and has_media:
-            print("Error: mode 't2v' does not accept reference media", file=sys.stderr); sys.exit(1)
-        if mode == "omni_reference" and not has_media:
-            print("Error: mode 'omni_reference' requires reference media", file=sys.stderr); sys.exit(1)
+        has_media = any(flag in a for flag in ("--start-image", "--end-image", "--image-references", "--video-references", "--audio-references"))
+        if model in ("seedance_2_5", "kling4_0"):
+            if mode == "t2v" and has_media:
+                print("Error: mode 't2v' does not accept reference media", file=sys.stderr); sys.exit(1)
+            if mode == "omni_reference" and not has_media:
+                print("Error: mode 'omni_reference' requires reference media", file=sys.stderr); sys.exit(1)
         if os.environ.get("STUB_HF_SLEEP"):
             import time
             time.sleep(float(os.environ["STUB_HF_SLEEP"]))
@@ -105,7 +131,8 @@ elif a[:2] == ["generate", "create"]:
         with open(path, "wb") as f:
             f.write(b"\x00\x00\x00\x18ftypmp42\x00\x00\x00\x00mp42isom")
         _stub.painted("higgsfield", path)
-        c = COST if "STUB_HF_COST" in os.environ else 35.0
+        default_c = 18.0 if model == "gemini_omni_flash_1_2" else (96.0 if model == "intone" else 35.0)
+        c = COST if "STUB_HF_COST" in os.environ else default_c
         with open(BAL, "w") as f: f.write(str(credits - c))
         observed = os.environ.get("STUB_HF_OBSERVED", model)
         print(json.dumps([{"id": jid, "job_type": observed, "display_name": "Stub " + observed, "status": "completed",

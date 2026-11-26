@@ -20,7 +20,7 @@
 #
 # Usage:
 #   higgsfield-image "<prompt>" <out.(png|jpg|webp)> [--size WxH] [--aspect R] [--ref IMG]...
-#                    [--model JOB_TYPE] [--soul-id NAME_OR_UUID] [--style-id UUID]
+#                    [--model JOB_TYPE] [--soul-id NAME_OR_UUID] [--style-id UUID] [--cinematic]
 #
 # Env: HIGGSFIELD_IMAGE_MODEL (default nano_banana_2_1), HIGGSFIELD_IMAGE_RESOLUTION (1k|2k|4k, default 1k),
 #      HIGGSFIELD_IMAGE_MAX_CREDITS (default 2), HIGGSFIELD_IMAGE_TIMEOUT (seconds, default 600).
@@ -49,7 +49,7 @@ import json, math, os, re, shutil, subprocess, sys, tempfile, time, urllib.reque
 me = "higgsfield-image"
 def say(*a): print(f"{me}:", *a, file=sys.stderr)
 def usage():
-    say('usage: higgsfield-image "<prompt>" <out.png|out.jpg|out.webp> [--size WxH] [--aspect R] [--ref IMG]... [--model JOB_TYPE] [--soul-id NAME_OR_UUID] [--style-id UUID]')
+    say('usage: higgsfield-image "<prompt>" <out.png|out.jpg|out.webp> [--size WxH] [--aspect R] [--ref IMG]... [--model JOB_TYPE] [--soul-id NAME_OR_UUID] [--style-id UUID] [--cinematic]')
     sys.exit(2)
 
 argv = sys.argv[1:]
@@ -57,6 +57,7 @@ if len(argv) < 2: usage()
 prompt, out = argv[0], argv[1]
 size = aspect = soul_id = style_id = None; refs = []
 explicit_model = False
+cinematic = False
 model = os.environ.get("HIGGSFIELD_IMAGE_MODEL") or "nano_banana_2_1"
 i = 2
 while i < len(argv):
@@ -70,13 +71,17 @@ while i < len(argv):
         elif a == "--soul-id": soul_id = v
         elif a == "--style-id": style_id = v
         i += 2
+    elif a == "--cinematic":
+        cinematic = True; i += 1
     else:
         usage()
 if size and not (size.count("x") == 1 and all(p.isdigit() and int(p) > 0 for p in size.split("x"))):
     say("--size must look like 1600x900"); sys.exit(2)
 for r in refs:
     if not os.path.isfile(r): say(f"reference not found: {r}"); sys.exit(2)
-if soul_id and not explicit_model:
+if cinematic and not explicit_model:
+    model = "soul_cinematic"
+elif soul_id and not explicit_model:
     model = "text2image_soul_v2"
 res = os.environ.get("HIGGSFIELD_IMAGE_RESOLUTION") or "1k"
 cap = float(os.environ.get("HIGGSFIELD_IMAGE_MAX_CREDITS") or 2)
@@ -171,8 +176,8 @@ if style_id:
         say("text2image_soul_v2 cannot combine --style-id with --ref image references"); sys.exit(2)
     if "style_id" in params:
         job += ["--style_id", style_id]
-if model == "text2image_soul_v2" and len(refs) > 1:
-    say(f"text2image_soul_v2 accepts at most 1 --ref image; using the first of {len(refs)}")
+if model in ("text2image_soul_v2", "soul_cinematic") and len(refs) > 1:
+    say(f"{model} accepts at most 1 --ref image; using the first of {len(refs)}")
     refs = refs[:1]
 for r in refs: job += ["--image-references", os.path.abspath(r)]
 

@@ -75,9 +75,10 @@ TOOLS = [
                     "description": "When painter='council', also include Higgsfield as a 4th option (spends Higgsfield plan credits).",
                 },
                 "size": {"type": "string", "description": "Target pixel size like 1536x1024, 1080x1920, or 1024x1024."},
-                "model": {"type": "string", "description": "Higgsfield-only model override (e.g. nano_banana_2_1, gpt_image_2_6, text2image_soul_v2)."},
-                "soul_id": {"type": "string", "description": "Higgsfield Soul 2.0 character name or UUID (auto-uses text2image_soul_v2 unless model is set)."},
+                "model": {"type": "string", "description": "Higgsfield-only model override (e.g. nano_banana_2_1, gpt_image_2_6, text2image_soul_v2, soul_cinematic)."},
+                "soul_id": {"type": "string", "description": "Higgsfield Soul 2.0 / Soul Cinematic character name or UUID."},
                 "style_id": {"type": "string", "description": "Optional Higgsfield Soul style UUID."},
+                "cinematic": {"type": "boolean", "default": False, "description": "Higgsfield-only shorthand for soul_cinematic (0.12 cr, 21:9 anamorphic stills)."},
                 "refs": {"type": "string", "description": "Saved reference set name (from subpowers_refs)."},
                 "ref_paths": {
                     "type": "array",
@@ -149,11 +150,15 @@ TOOLS = [
                     "default": "grok",
                     "description": "grok (default, X Subscription) or higgsfield (opt-in, spends Higgsfield plan credits).",
                 },
-                "model": {"type": "string", "description": "Higgsfield-only video model (requires painter='higgsfield'; default seedance_2_5)."},
+                "model": {"type": "string", "description": "Higgsfield-only video model (requires painter='higgsfield'; e.g. seedance_2_5, gemini_omni_flash_1_2, intone, veo3_1, kling4_0)."},
+                "mode": {"type": "string", "description": "Optional Higgsfield video mode override (e.g. omni_reference, reference-to-video, edit, extend)."},
                 "first_frame": {"type": "string", "description": "Absolute path to pinned first frame image."},
                 "last_frame": {"type": "string", "description": "Absolute path to pinned last frame image."},
+                "character_image": {"type": "string", "description": "Higgsfield Intone character portrait/sheet image (use with model='intone' + location_image + audio_paths)."},
+                "location_image": {"type": "string", "description": "Higgsfield Intone room/location photo (use with model='intone')."},
                 "refs": {"type": "string", "description": "Saved reference set name."},
-                "ref_paths": {"type": "array", "items": {"type": "string"}, "description": "Reference image paths."},
+                "ref_paths": {"type": "array", "items": {"type": "string"}, "description": "Reference image or video paths."},
+                "audio_paths": {"type": "array", "items": {"type": "string"}, "description": "Higgsfield-only audio reference paths (2-30s for Intone; rhythm/VO for Seedance 2.5 Omni Reference)."},
                 "voice": {"type": "string", "description": "Grok-only preset voice (e.g. ara, eve, leo, rex)."},
                 "duration": {"type": "integer", "description": "Clip duration in seconds (1-15 for Grok; model-dependent for Higgsfield)."},
                 "aspect": {"type": "string", "default": "16:9", "description": "Aspect ratio like 16:9, 9:16, 1:1."},
@@ -372,17 +377,18 @@ def handle_tool(name, args):
             out_path = validate_output_path(out_path)
         ref_paths = expect_str_list(args, "ref_paths")
         with_hf = expect_bool(args, "with_higgsfield", False)
+        cinematic = expect_bool(args, "cinematic", False)
         snapshot = expect_bool(args, "snapshot", False)
         painter = args.get("painter")
-        hf_only_used = any(args.get(k) for k in ("model", "soul_id", "style_id"))
+        hf_only_used = any(args.get(k) for k in ("model", "soul_id", "style_id")) or cinematic
         if hf_only_used:
             if not painter or painter == "auto":
                 painter = "higgsfield"
             elif painter == "council":
                 if not with_hf:
-                    return False, {"error": "model, soul_id, and style_id require with_higgsfield=true when painter='council'"}
+                    return False, {"error": "model, soul_id, style_id, and cinematic require with_higgsfield=true when painter='council'"}
             elif painter != "higgsfield":
-                return False, {"error": "model, soul_id, and style_id require painter='higgsfield' or painter='council' with with_higgsfield=true"}
+                return False, {"error": "model, soul_id, style_id, and cinematic require painter='higgsfield' or painter='council' with with_higgsfield=true"}
         if args.get("refs") is not None:
             validate_ref_name(args["refs"])
         cmd = ["bash", SUBPOWERS, "image", prompt]
@@ -400,6 +406,8 @@ def handle_tool(name, args):
             cmd.extend(["--soul-id", str(args["soul_id"])])
         if args.get("style_id"):
             cmd.extend(["--style-id", str(args["style_id"])])
+        if cinematic:
+            cmd.append("--cinematic")
         if args.get("refs"):
             cmd.extend(["--refs", str(args["refs"])])
         for rp in ref_paths:
@@ -489,6 +497,7 @@ def handle_tool(name, args):
         if out_path is not None:
             out_path = validate_output_path(out_path)
         ref_paths = expect_str_list(args, "ref_paths")
+        audio_paths = expect_str_list(args, "audio_paths")
         keep_audio = expect_bool(args, "keep_audio", False)
         snapshot = expect_bool(args, "snapshot", False)
         painter = args.get("painter") or "grok"
@@ -496,8 +505,9 @@ def handle_tool(name, args):
             return False, {"error": "video 'painter' must be 'grok' or 'higgsfield'"}
         if painter == "higgsfield" and args.get("voice"):
             return False, {"error": "'voice' is Grok-only and not supported with painter='higgsfield'"}
-        if painter == "grok" and args.get("model"):
-            return False, {"error": "'model' is Higgsfield-only; explicitly pass painter='higgsfield' to opt into Higgsfield credits"}
+        hf_video_only = any(args.get(k) for k in ("model", "mode", "character_image", "location_image")) or bool(audio_paths)
+        if painter == "grok" and hf_video_only:
+            return False, {"error": "'model', 'mode', 'character_image', 'location_image', and 'audio_paths' are Higgsfield-only; explicitly pass painter='higgsfield'"}
         if args.get("refs") is not None:
             validate_ref_name(args["refs"])
         cmd = ["bash", SUBPOWERS, "video", prompt]
@@ -506,14 +516,22 @@ def handle_tool(name, args):
         cmd.extend(["--painter", painter])
         if args.get("model"):
             cmd.extend(["--model", str(args["model"])])
+        if args.get("mode"):
+            cmd.extend(["--mode", str(args["mode"])])
         if args.get("first_frame"):
             cmd.extend(["--first", str(args["first_frame"])])
         if args.get("last_frame"):
             cmd.extend(["--last", str(args["last_frame"])])
+        if args.get("character_image"):
+            cmd.extend(["--character", str(args["character_image"])])
+        if args.get("location_image"):
+            cmd.extend(["--location", str(args["location_image"])])
         if args.get("refs"):
             cmd.extend(["--refs", str(args["refs"])])
         for rp in ref_paths:
             cmd.extend(["--ref", rp])
+        for ap in audio_paths:
+            cmd.extend(["--audio", ap])
         if args.get("voice"):
             cmd.extend(["--voice", str(args["voice"])])
         if args.get("duration") is not None:
