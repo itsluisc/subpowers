@@ -2,21 +2,25 @@
 # higgsfield-image: paint one image on the user's own Higgsfield plan, through the official
 # `higgsfield` CLI (browser sign-in, no API key). Same contract as the other painters.
 #
-# HOW IT WORKS (higgsfield 1.2.2, measured 2026-11-13):
+# HOW IT WORKS (higgsfield 1.2.2):
 #   painter  `higgsfield generate create <model> --prompt ... --wait --json`. The model is named
 #            by Higgsfield's own job id, so the receipt can show the id we asked for AND the id
-#            the finished job reports. Default nano_banana_2_1 (Google Nano Banana 2.1, newer than
-#            the Nano Banana 2 that Antigravity paints with today); gpt_image_2_6 and
-#            grok_image_2_0 also work (HIGGSFIELD_IMAGE_MODEL).
-#   cost     Higgsfield spends plan CREDITS per image (the other painters do not). Before painting,
-#            `higgsfield generate cost` prices the job; above HIGGSFIELD_IMAGE_MAX_CREDITS (default 2)
-#            it refuses. The receipt records the estimate and the balance before and after.
-#   opt-in   for that reason this painter is never picked by `auto` or `council`: ask for it by name
-#            (--painter higgsfield).
+#            the finished job reports. Default nano_banana_2_1; gpt_image_2_6, grok_image_2_0,
+#            text2image_soul_v2 (with --soul-id), and seedream_5_5 also work (HIGGSFIELD_IMAGE_MODEL).
+#   soul-id  --soul-id <name-or-uuid> resolves your trained Soul 2.0 character ID via
+#            `higgsfield soul-id list` and auto-selects text2image_soul_v2 (~0.12 credits)
+#            unless --model is explicitly given.
+#   cost     Higgsfield spends plan CREDITS per image via CLI (Higgsfield gates free-unlimited
+#            `use_unlim` to web, Claude chat, Claude Cowork, and ChatGPT). Before painting,
+#            `higgsfield generate cost` prices the job; above HIGGSFIELD_IMAGE_MAX_CREDITS
+#            (default 2) it refuses. The receipt records the estimate and balance before/after.
+#   opt-in   never picked by `auto` or default `council`: ask by name (--painter higgsfield),
+#            pass --soul-id, or pass --with-higgsfield to council.
 #   auth     `higgsfield auth login` once (OAuth in the browser). No key is read or written here.
 #
 # Usage:
-#   higgsfield-image "<prompt>" <out.(png|jpg|webp)> [--size WxH] [--aspect R] [--ref IMG]... [--model JOB_TYPE]
+#   higgsfield-image "<prompt>" <out.(png|jpg|webp)> [--size WxH] [--aspect R] [--ref IMG]...
+#                    [--model JOB_TYPE] [--soul-id NAME_OR_UUID] [--style-id UUID]
 #
 # Env: HIGGSFIELD_IMAGE_MODEL (default nano_banana_2_1), HIGGSFIELD_IMAGE_RESOLUTION (1k|2k|4k, default 1k),
 #      HIGGSFIELD_IMAGE_MAX_CREDITS (default 2), HIGGSFIELD_IMAGE_TIMEOUT (seconds, default 600).
@@ -27,35 +31,39 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Per-user defaults: KEY=value lines in ~/.subpowers/config (only this painter's keys are read).
 cfg="${SUBPOWERS_HOME:-$HOME/.subpowers}/config"
 if [[ -f "$cfg" ]]; then
-  while IFS='=' read -r k v; do
-    case "$k" in HIGGSFIELD_IMAGE_MODEL|HIGGSFIELD_IMAGE_RESOLUTION|HIGGSFIELD_IMAGE_MAX_CREDITS)
+  while IFS='=' read -r k v || [[ -n "$k" ]]; do
+    case "$k" in HIGGSFIELD_IMAGE_MODEL|HIGGSFIELD_IMAGE_RESOLUTION|HIGGSFIELD_IMAGE_MAX_CREDITS|HIGGSFIELD_IMAGE_QUALITY)
+      v="${v%\"}"; v="${v#\"}"
       [[ -z "${!k:-}" ]] && export "$k=$v" ;; esac
   done <"$cfg"
 fi
 export SUBPOWERS_BIN="$here"
 exec python3 - "$@" <<'PY'
-import json, math, os, shutil, subprocess, sys, tempfile, time, urllib.request
+import json, math, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 
 me = "higgsfield-image"
 def say(*a): print(f"{me}:", *a, file=sys.stderr)
 def usage():
-    say('usage: higgsfield-image "<prompt>" <out.png|out.jpg|out.webp> [--size WxH] [--aspect R] [--ref IMG]... [--model JOB_TYPE]')
+    say('usage: higgsfield-image "<prompt>" <out.png|out.jpg|out.webp> [--size WxH] [--aspect R] [--ref IMG]... [--model JOB_TYPE] [--soul-id NAME_OR_UUID] [--style-id UUID]')
     sys.exit(2)
 
 argv = sys.argv[1:]
 if len(argv) < 2: usage()
 prompt, out = argv[0], argv[1]
-size = aspect = None; refs = []
+size = aspect = soul_id = style_id = None; refs = []
+explicit_model = False
 model = os.environ.get("HIGGSFIELD_IMAGE_MODEL") or "nano_banana_2_1"
 i = 2
 while i < len(argv):
     a = argv[i]
-    if a in ("--size", "--aspect", "--ref", "--model", "--driver") and i + 1 < len(argv):
+    if a in ("--size", "--aspect", "--ref", "--model", "--driver", "--soul-id", "--style-id") and i + 1 < len(argv):
         v = argv[i + 1]
         if a == "--size": size = v
         elif a == "--aspect": aspect = v
         elif a == "--ref": refs.append(v)
-        elif a == "--model": model = v
+        elif a == "--model": model = v; explicit_model = True
+        elif a == "--soul-id": soul_id = v
+        elif a == "--style-id": style_id = v
         i += 2
     else:
         usage()
@@ -63,12 +71,14 @@ if size and not (size.count("x") == 1 and all(p.isdigit() and int(p) > 0 for p i
     say("--size must look like 1600x900"); sys.exit(2)
 for r in refs:
     if not os.path.isfile(r): say(f"reference not found: {r}"); sys.exit(2)
+if soul_id and not explicit_model:
+    model = "text2image_soul_v2"
 res = os.environ.get("HIGGSFIELD_IMAGE_RESOLUTION") or "1k"
 cap = float(os.environ.get("HIGGSFIELD_IMAGE_MAX_CREDITS") or 2)
 tmo = int(os.environ.get("HIGGSFIELD_IMAGE_TIMEOUT") or 600)
 hf = shutil.which("higgsfield")
 if not hf:
-    say("the higgsfield CLI is not installed (brew install higgsfield, then: higgsfield auth login)"); sys.exit(3)
+    say("the higgsfield CLI is not installed (install higgsfield, then: higgsfield auth login)"); sys.exit(3)
 
 def cli(*args, timeout=60):
     r = subprocess.run([hf, *args, "--json", "--no-color"], capture_output=True, text=True, timeout=timeout)
@@ -80,12 +90,37 @@ def balance():
     try: return float(cli("account", "status").get("credits"))
     except Exception: return None
 
+UUID_RE = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
 t0 = time.time()
 try:
     st = cli("account", "status")
 except Exception as e:
     say(f"not signed in to Higgsfield ({e}). Run: higgsfield auth login"); sys.exit(3)
 before = st.get("credits"); plan = st.get("subscription_plan_type") or "?"
+
+resolved_soul = None
+soul_label = None
+if soul_id:
+    if UUID_RE.match(soul_id):
+        resolved_soul = soul_id
+        soul_label = soul_id
+    else:
+        try:
+            souls = cli("soul-id", "list")
+        except Exception as e:
+            say(f"could not resolve --soul-id '{soul_id}' ({e})"); sys.exit(1)
+        q = soul_id.strip().lower()
+        exact = [s for s in souls if (s.get("name") or "").strip().lower() == q]
+        matches = exact or [s for s in souls if q in (s.get("name") or "").lower() and s.get("status") == "completed"]
+        if len(matches) == 1:
+            resolved_soul = matches[0]["id"]
+            soul_label = f"{matches[0].get('name')} ({resolved_soul})"
+        elif len(matches) > 1:
+            opts = ", ".join(f"{s.get('name')} ({s.get('id')})" for s in matches[:5])
+            say(f"multiple Soul IDs match '{soul_id}': {opts}. Pass exact name or UUID."); sys.exit(2)
+        else:
+            say(f"no Soul ID matches '{soul_id}'. Run: subpowers soul list"); sys.exit(2)
 
 # The model's own aspect list; the nearest one (log distance) to --size, else --aspect, else 1:1.
 try:
@@ -104,7 +139,36 @@ else:
 job = ["--prompt", prompt]
 if "aspect_ratio" in params: job += ["--aspect_ratio", aspect]
 if "resolution" in params: job += ["--resolution", res]
-if "quality" in params: job += ["--quality", os.environ.get("HIGGSFIELD_IMAGE_QUALITY") or "high"]
+if "quality" in params:
+    qspec = params["quality"]
+    qenum = qspec.get("enum") or []
+    qenv = os.environ.get("HIGGSFIELD_IMAGE_QUALITY")
+    if qenv:
+        if not qenum or qenv in qenum:
+            qval = qenv
+        else:
+            qval = qspec.get("default") or ("high" if "high" in qenum else qenum[-1])
+            say(f"HIGGSFIELD_IMAGE_QUALITY='{qenv}' is not valid for {model} (allowed: {', '.join(qenum)}); using {qval}")
+    elif not qenum or "high" in qenum:
+        qval = "high"
+    else:
+        qval = qspec.get("default") or qenum[-1]
+    job += ["--quality", str(qval)]
+if resolved_soul:
+    if "custom_reference_id" in params:
+        job += ["--custom_reference_id", resolved_soul]
+    elif "soul_id" in params:
+        job += ["--soul_id", resolved_soul]
+    else:
+        say(f"model '{model}' does not accept a Soul ID; use text2image_soul_v2"); sys.exit(2)
+if style_id:
+    if refs and model == "text2image_soul_v2":
+        say("text2image_soul_v2 cannot combine --style-id with --ref image references"); sys.exit(2)
+    if "style_id" in params:
+        job += ["--style_id", style_id]
+if model == "text2image_soul_v2" and len(refs) > 1:
+    say(f"text2image_soul_v2 accepts at most 1 --ref image; using the first of {len(refs)}")
+    refs = refs[:1]
 for r in refs: job += ["--image-references", os.path.abspath(r)]
 
 try:
@@ -167,6 +231,7 @@ try:
         subprocess.run(ops + ["convert", deliver, out], check=True); notes.append(f"converted {src_ext} -> {out_ext}")
     else:
         shutil.copy(deliver, out)
+    shutil.rmtree(work, ignore_errors=True)
     after = balance()
     spent = (round(float(before) - after, 3) if before is not None and after is not None else None)
     observed = j.get("job_type") or "?"
@@ -176,7 +241,7 @@ try:
         f"  image model requested: {model} | job reports: {observed} ({j.get('display_name', '?')})"
         + ("" if observed == model else "  <- DIFFERENT from the request"),
         f"  job id: {j.get('id')} | aspect requested: {aspect} | resolution: {res}",
-        f"  references: {len(refs)}",
+        f"  soul id: {soul_label or 'none'} | references: {len(refs)}",
         f"  credits: estimated {est}; balance {before} -> {after}" + (f" (spent {spent})" if spent is not None else ""),
         f"  timings: paint {paint_s}s, total {round(time.time() - t0)}s",
         f"  delivered: {out} ({dims(out)}; painter returned {raw_dims})" + (f"; {'; '.join(notes)}" if notes else ""),

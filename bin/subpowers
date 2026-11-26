@@ -2,15 +2,19 @@
 # subpowers: the AI subscriptions you already pay for, as powers for every agent.
 #
 # Usage:
-#   subpowers image "<prompt>" out.png [--painter P|council] [--size WxH] [--ref IMG]... [--refs NAME]
-#   subpowers sheet NAME out.png [--painter P|all]      character sheet (front, sides, 3/4, close-up)
+#   subpowers image "<prompt>" out.png [--painter P|council] [--with-higgsfield] [--size WxH] [--ref IMG]... [--refs NAME] [--soul-id ID]
+#   subpowers avatar|sheet NAME|--from IMG out.png [--painter P|council] [--style photoreal|3d-toon]
+#                                                       dark neutral gray (#3A3A3C) character turnaround sheet
+#   subpowers soul list | get NAME_OR_UUID | create NAME IMG1..IMG5 [--cinematic] [--wait]
+#                                                       manage or train Higgsfield Soul 2.0 character IDs
 #   subpowers storyboard shots.txt OUTDIR [--refs NAME] [--painter P] [--size WxH] [--style "..."]
 #   subpowers refs add NAME IMG...  |  refs list [NAME]  |  refs path NAME
 #   subpowers slideshow OUT.webp IMG... [--width 880]    looping slider of your picks (plays in any README)
 #   subpowers stopmotion "<concept>" out.mp4 [--frames 8] [--fps 6] [--chain] [--plan frames.txt] [--refs NAME] [--audio bed.m4a] [--resume]
 #                                                       handmade stop-motion: frames painted from frame 1, then an mp4 + webp loop
 #   subpowers think "<question>" [--json-schema FILE]    a text answer on the same subscriptions (plans frames, slides)
-#   subpowers video "<prompt>" out.mp4 [--first IMG] [--refs NAME] [--duration 1-15] [--aspect 16:9]  a short Grok video with sound
+#   subpowers video "<prompt>" out.mp4 [--painter grok|higgsfield] [--model M] [--first IMG] [--refs NAME] [--duration 1-15] [--aspect 16:9]
+#                                                       short video with sound (Grok Imagine 1.5 default, or opt-in Higgsfield video)
 #   subpowers library find [WORDS] [--painter P] [--tag k=v]  every image you made, with its tags
 #   subpowers doctor [--fix] [--smoke]  |  powers  |  update  |  --version
 #   subpowers canary [--live] [--json] [--notify]  drift radar (vendor CLIs changing); --install-launchagent
@@ -29,12 +33,13 @@
 #   chatgpt      OpenAI's current image model through the codex CLI (ChatGPT plan). 30-100 s.
 #   antigravity  Google's Nano Banana 2 through the Antigravity CLI (Google AI plan). 20-120 s.
 #                ("google" is an alias; the painter id stays antigravity.)
-#   grok         xAI's Grok Imagine 2.0 through the Grok CLI (SuperGrok plan). 35-100 s.
-#   higgsfield   opt-in: Higgsfield's own models (default Nano Banana 2.1) through the official higgsfield CLI.
-#                Spends plan credits per image (capped, priced first), so auto and council never pick it.
+#   grok         xAI's Grok Imagine 2.0 through the Grok CLI (The X Subscription, formerly SuperGrok). 35-100 s.
+#   higgsfield   opt-in: Higgsfield's models (nano_banana_2_1, gpt_image_2_6, text2image_soul_v2, seedance_2_5)
+#                through the official higgsfield CLI. Spends plan credits (capped, priced first), so auto and
+#                default council never pick it; opt in with --painter higgsfield, --soul-id, or --with-higgsfield.
 # --painter auto (default): the first connected painter; if it fails (paused plan, quota), the next.
-# --painter council (or all): every connected painter paints the same prompt in parallel, plus a side-by-side
-#   sheet, so you pick the best one. SUBPOWERS_PAINTER sets the default.
+# --painter council (or all): every connected subscription painter paints the same prompt in parallel, plus a
+#   side-by-side sheet, so you pick the best one. Pass --with-higgsfield for a 4th option. SUBPOWERS_PAINTER sets default.
 set -euo pipefail
 
 src="${BASH_SOURCE[0]}"
@@ -45,9 +50,9 @@ done
 here="$(cd "$(dirname "$src")" && pwd)"
 HOME_DIR="${SUBPOWERS_HOME:-$HOME/.subpowers}"
 ORDER="chatgpt antigravity grok"
-# Opt-in painters spend plan credits per image, so auto and council never pick them; ask by name.
+# Opt-in painters spend plan credits per image, so auto and default council never pick them; ask by name.
 OPTIN="higgsfield"
-VERSION="0.4.0"
+VERSION="0.5.0"
 
 # The help is the header comment, read up to its first non-comment line so it cannot drift.
 usage() { awk 'NR == 1 { next } !/^#/ { exit } { sub(/^# ?/, ""); print }' "$here/subpowers" >&2; exit "${1:-2}"; }
@@ -279,11 +284,14 @@ case "$cmd" in
     [[ $# -ge 1 ]] || usage
     prompt="$1"; shift; out=""
     if [[ $# -gt 0 && "$1" != --* ]]; then out="$1"; shift; fi
-    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; args=(); has_size=""
+    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; painter_explicit=""; with_hf=""; has_soul=""; args=(); hf_args=(); has_size=""
     while [[ $# -gt 0 ]]; do
       if into_opt "$@"; then shift "$INTO_EAT"; continue; fi
       case "$1" in
-        --painter) [[ $# -ge 2 ]] || usage; painter="$(norm_painter "$2")"; shift 2 ;;
+        --painter) [[ $# -ge 2 ]] || usage; painter="$(norm_painter "$2")"; painter_explicit=1; shift 2 ;;
+        --with-higgsfield) with_hf=1; shift ;;
+        --soul-id) [[ $# -ge 2 ]] || usage; has_soul=1; hf_args+=("$1" "$2"); shift 2 ;;
+        --style-id|--model) [[ $# -ge 2 ]] || usage; hf_args+=("$1" "$2"); shift 2 ;;
         --size) [[ $# -ge 2 ]] || usage; has_size=1; args+=("$1" "$2"); shift 2 ;;
         --refs)
           [[ $# -ge 2 ]] || usage
@@ -302,24 +310,52 @@ $MATCH_SET_TEXT"; shift 2 ;;
         *) args+=("$1"); shift ;;
       esac
     done
+    # Only Higgsfield accepts --soul-id / --style-id / --model: auto-route when painter was not pinned,
+    # or refuse cleanly if a non-Higgsfield single painter was explicitly pinned with those flags.
+    if [[ ${#hf_args[@]} -gt 0 ]]; then
+      if [[ -z "$painter_explicit" ]]; then
+        painter="higgsfield"
+      elif [[ "$painter" != higgsfield && "$painter" != all ]]; then
+        say "--soul-id, --style-id, and --model are Higgsfield-only flags (use --painter higgsfield or --painter council --with-higgsfield)"; exit 2
+      fi
+    fi
     into_check
     if [[ -n "$into" ]]; then
       [[ "$painter" != all ]] || { say "--into mounts one image; pick a painter or leave auto (a council paints several)"; exit 2; }
       into_user_out="$out"; ext="png"; [[ -n "$out" && "$out" == *.* ]] && ext="${out##*.}"
       into_begin image "$ext" "$prompt"
       [[ -n "$has_size" ]] || args+=(--size "$INTO_SIZE")
-      got="$(paint "$painter" "$prompt" "$INTO_OUT" ${args[@]+"${args[@]}"} | tail -n 1)" || exit $?
+      if [[ "$painter" == higgsfield ]]; then
+        got="$(paint "$painter" "$prompt" "$INTO_OUT" ${args[@]+"${args[@]}"} ${hf_args[@]+"${hf_args[@]}"} | tail -n 1)" || exit $?
+      else
+        got="$(paint "$painter" "$prompt" "$INTO_OUT" ${args[@]+"${args[@]}"} | tail -n 1)" || exit $?
+      fi
       into_end "${got:-$INTO_OUT}" image "$prompt"
       exit 0
     fi
     [[ -n "$out" ]] || usage
     case "$painter" in
-      auto|chatgpt|antigravity|grok|higgsfield) paint "$painter" "$prompt" "$out" ${args[@]+"${args[@]}"} ;;
+      higgsfield) paint "$painter" "$prompt" "$out" ${args[@]+"${args[@]}"} ${hf_args[@]+"${hf_args[@]}"} ;;
+      auto|chatgpt|antigravity|grok) paint "$painter" "$prompt" "$out" ${args[@]+"${args[@]}"} ;;
       all)
         stem="${out%.*}"; ext="${out##*.}"; pids=(); labels=()
         export SUBPOWERS_BATCH="${SUBPOWERS_BATCH:-$(date +%Y%m%d-%H%M%S)-$$}"
-        for p in $(connected); do
-          ( paint "$p" "$prompt" "${stem}-${p}.${ext}" ${args[@]+"${args[@]}"} ) &
+        council_list=""
+        if [[ -n "${SUBPOWERS_COUNCIL_PAINTERS:-}" ]]; then
+          for cp in ${SUBPOWERS_COUNCIL_PAINTERS//,/ }; do
+            cp="$(norm_painter "$cp")"
+            has "$cp" && council_list="$council_list $cp"
+          done
+        else
+          council_list="$(connected)"
+          if [[ -n "$with_hf" ]] && has higgsfield; then council_list="$council_list higgsfield"; fi
+        fi
+        for p in $council_list; do
+          if [[ "$p" == higgsfield ]]; then
+            ( paint "$p" "$prompt" "${stem}-${p}.${ext}" ${args[@]+"${args[@]}"} ${hf_args[@]+"${hf_args[@]}"} ) &
+          else
+            ( paint "$p" "$prompt" "${stem}-${p}.${ext}" ${args[@]+"${args[@]}"} ) &
+          fi
           pids+=($!); labels+=("$p")
         done
         [[ ${#pids[@]} -gt 0 ]] || { say "no painter is connected. Run: subpowers doctor"; exit 3; }
@@ -335,15 +371,38 @@ $MATCH_SET_TEXT"; shift 2 ;;
       *) say "unknown painter '$painter' (chatgpt, antigravity, grok, council, or higgsfield: opt-in, spends plan credits)"; exit 2 ;;
     esac
     ;;
-  sheet)
+  sheet|avatar)
     [[ $# -ge 2 ]] || usage
-    name="$1"; out="$2"; shift 2
-    prompt="Character reference sheet of the person in the reference photos, for keeping them consistent across future images. \
-One clean studio sheet on a plain light-gray seamless background, even soft light, the same outfit in every view: \
+    from_img=""; name=""; style="photoreal"; extra=()
+    if [[ "$1" == "--from" ]]; then
+      [[ $# -ge 3 ]] || usage
+      from_img="$2"; out="$3"; shift 3
+    else
+      name="$1"; out="$2"; shift 2
+    fi
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --style) [[ $# -ge 2 ]] || usage; style="$2"; shift 2 ;;
+        *) extra+=("$1"); shift ;;
+      esac
+    done
+    # Flat dark neutral gray (#3A3A3C) with shadowless light avoids white reflector glare and black hair crush
+    # so the character drops cleanly into downstream scenes and video models.
+    if [[ "$style" == "3d-toon" ]]; then
+      style_line="Stylized 3D toon-shaded character sheet with crisp edges, consistent proportions, and expressive facial clarity"
+    else
+      style_line="Photorealistic studio turnaround with natural skin texture, authentic hair and wardrobe detail"
+    fi
+    prompt="Character reference turnaround sheet of the person in the reference photos, built to keep them consistent across future scenes and video models. \
+One clean studio sheet on a flat dark neutral gray seamless background (#3A3A3C, never white or black), completely even shadowless soft light, the exact same outfit in every view: \
 full-body front view, full-body left profile, full-body right three-quarter view, full-body back view, \
 and a large head-and-shoulders close-up of the face looking at the camera. Keep the exact face, skin tone, hair and build. \
-Photorealistic, evenly spaced, no text, no labels, no watermark."
-    exec bash "$here/subpowers" image "$prompt" "$out" --refs "$name" --size "${SUBPOWERS_SHEET_SIZE:-1536x1024}" "$@"
+${style_line}, evenly spaced, no text, no labels, no watermark."
+    if [[ -n "$from_img" ]]; then
+      exec bash "$here/subpowers" image "$prompt" "$out" --ref "$from_img" --size "${SUBPOWERS_SHEET_SIZE:-1536x1024}" ${extra[@]+"${extra[@]}"}
+    else
+      exec bash "$here/subpowers" image "$prompt" "$out" --refs "$name" --size "${SUBPOWERS_SHEET_SIZE:-1536x1024}" ${extra[@]+"${extra[@]}"}
+    fi
     ;;
   storyboard)
     [[ $# -ge 2 ]] || usage
@@ -579,8 +638,9 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     [[ $# -ge 1 ]] || usage
     prompt="$1"; shift; out=""
     if [[ $# -gt 0 && "$1" != --* ]]; then out="$1"; shift; fi
-    vargs=(); has_src=""; aspect="16:9"; has_aspect=""; fpainter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"
-    # here --duration is the clip's own length (grok-video); the layer runs as long as the clip
+    vargs=(); grok_only=(); hf_only=(); has_src=""; aspect="16:9"; has_aspect=""
+    fpainter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; vpainter="grok"
+    # here --duration is the clip's own length (grok-video or higgsfield-video); the layer runs as long as the clip
     pre=(); while [[ $# -gt 0 ]]; do
       if [[ "$1" != --duration ]] && into_opt "$@"; then shift "$INTO_EAT"; else pre+=("$1"); shift; fi
     done
@@ -596,33 +656,49 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     [[ -n "$out" ]] || usage
     while [[ $# -gt 0 ]]; do
       case "$1" in
-        --first|--last|--ref|--voice) [[ $# -ge 2 ]] || usage; has_src=1; vargs+=("$1" "$2"); shift 2 ;;
+        --first|--last|--ref) [[ $# -ge 2 ]] || usage; has_src=1; vargs+=("$1" "$2"); shift 2 ;;
+        --voice) [[ $# -ge 2 ]] || usage; has_src=1; grok_only+=(--voice "$2"); shift 2 ;;
+        --model) [[ $# -ge 2 ]] || usage; hf_only+=(--model "$2"); shift 2 ;;
+        --no-audio) hf_only+=(--no-audio); shift ;;
         --refs)
           [[ $# -ge 2 ]] || usage
           rf="$(ref_files "$2")" || exit 3
           while IFS= read -r f; do [[ -n "$f" ]] && { vargs+=(--ref "$f"); has_src=1; }; done <<< "$rf"
           shift 2 ;;
         --aspect) [[ $# -ge 2 ]] || usage; aspect="$2"; vargs+=("$1" "$2"); shift 2 ;;
-        --painter) [[ $# -ge 2 ]] || usage; fpainter="$(norm_painter "$2")"; shift 2 ;;
+        --painter)
+          [[ $# -ge 2 ]] || usage
+          np="$(norm_painter "$2")"
+          if [[ "$np" == higgsfield ]]; then vpainter="higgsfield"
+          elif [[ "$np" == grok ]]; then vpainter="grok"
+          else fpainter="$np"; fi
+          shift 2 ;;
         *) vargs+=("$1"); shift ;;
       esac
     done
-    if [[ -z "$has_src" ]]; then
-      # Video starts from an image: paint the first frame in the clip's shape, then animate it.
-      case "$aspect" in
-        9:16) fsize=1080x1920 ;; 1:1) fsize=1024x1024 ;; 4:3) fsize=1600x1200 ;; 3:4) fsize=1200x1600 ;;
-        3:2) fsize=1536x1024 ;; 2:3) fsize=1024x1536 ;; *) fsize=1920x1080 ;;
-      esac
-      [[ "$fpainter" == all ]] && fpainter=auto
-      say "no image given: painting the first frame ($fsize) before animating it"
-      frame="$(paint "$fpainter" "$prompt" "${out%.*}.first.png" --size "$fsize" | tail -n 1)" || exit $?
-      vargs+=(--first "$frame")
+    if [[ "$vpainter" == higgsfield ]]; then
+      if [[ ${#grok_only[@]} -gt 0 ]]; then say "--voice is Grok-only and not supported with --painter higgsfield"; exit 2; fi
+      got="$(bash "$here/higgsfield-video" "$prompt" "$out" ${vargs[@]+"${vargs[@]}"} ${hf_only[@]+"${hf_only[@]}"})" || exit $?
+    else
+      if [[ ${#hf_only[@]} -gt 0 ]]; then say "--model and --no-audio are Higgsfield video flags (pass --painter higgsfield)"; exit 2; fi
+      if [[ -z "$has_src" ]]; then
+        # Grok video starts from an image: paint the first frame in the clip's shape, then animate it.
+        case "$aspect" in
+          9:16) fsize=1080x1920 ;; 1:1) fsize=1024x1024 ;; 4:3) fsize=1600x1200 ;; 3:4) fsize=1200x1600 ;;
+          3:2) fsize=1536x1024 ;; 2:3) fsize=1024x1536 ;; *) fsize=1920x1080 ;;
+        esac
+        [[ "$fpainter" == all ]] && fpainter=auto
+        say "no image given: painting the first frame ($fsize) before animating it"
+        frame="$(paint "$fpainter" "$prompt" "${out%.*}.first.png" --size "$fsize" | tail -n 1)" || exit $?
+        vargs+=(--first "$frame")
+      fi
+      got="$(bash "$here/grok-video" "$prompt" "$out" ${vargs[@]+"${vargs[@]}"} ${grok_only[@]+"${grok_only[@]}"})" || exit $?
     fi
-    got="$(bash "$here/grok-video" "$prompt" "$out" ${vargs[@]+"${vargs[@]}"})" || exit $?
     python3 "$here/library" add "$got" >/dev/null || true
     if [[ -n "$into" ]]; then into_end "$got" video "$prompt"; exit 0; fi
     echo "$got"
     ;;
+  soul|soul-id) exec bash "$here/higgsfield-soul" "$@" ;;
   think|plan) exec bash "$here/think" "$@" ;;
   hf|hyperframes) exec python3 "$here/hf-into" "$@" ;;
   slideshow|slider) exec python3 "$here/slideshow" "$@" ;;
@@ -636,6 +712,9 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     for p in $OPTIN; do
       if has "$p"; then printf 'image  %-12s ON   (opt-in: --painter %s, spends plan credits)\n' "$p" "$p"; else printf 'image  %-12s OFF  (opt-in; higgsfield auth login)\n' "$p"; fi
     done
+    if has grok; then printf 'video  %-12s ON   (Grok Imagine 1.5, The X Subscription)\n' "grok"; else printf 'video  %-12s OFF  (grok login)\n' "grok"; fi
+    if has higgsfield; then printf 'video  %-12s ON   (opt-in: --painter higgsfield, seedance_2_5 / kling4_0, spends credits)\n' "higgsfield"; else printf 'video  %-12s OFF  (opt-in; higgsfield auth login)\n' "higgsfield"; fi
+    if [[ -x "$here/subpowers-mcp" ]]; then printf 'mcp    %-12s ON   (%s/subpowers-mcp)\n' "stdio" "$here"; fi
     ;;
   update)
     root="$(cd "$here/.." && pwd)"

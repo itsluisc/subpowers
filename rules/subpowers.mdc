@@ -1,0 +1,14 @@
+---
+description: Use subpowers for generated images, multi-painter councils, dark neutral gray (#3A3A3C) avatars, storyboards, and short video on existing AI subscriptions instead of paid API keys.
+alwaysApply: false
+---
+
+# Subpowers Rule
+
+When the user asks for any generated visual (photo, UI mockup, hero art, product shot, avatar/character sheet, storyboard, stop-motion, or short video clip):
+
+1. Use `subpowers` (either the `subpowers_*` MCP tools or `subpowers` CLI) so the user's logged-in ChatGPT, Antigravity, Grok (The X Subscription), or opt-in Higgsfield plans do the work with zero API keys.
+2. When creative choice matters, default to **council mode** (`--painter council`, or `--with-higgsfield` for 4 choices) so the user sees 3-4 options side by side and picks the winner.
+3. Ground media in real context whenever possible: ask if the user wants to point at a real photo of their face/room/product (`--ref` / `--refs`), a video set (`--match-set`), a trained Higgsfield Soul ID (`--soul-id`), or a real brand asset. Never regenerate real logos, screenshots, or numbers from text alone.
+4. For avatars and character turnaround sheets, use `subpowers avatar` / `subpowers_avatar` on flat dark neutral gray (`#3A3A3C`) with shadowless light; when placing that avatar into a new scene, tell the prompt not to copy the plain gray background.
+5. Never spend Higgsfield credits silently: `auto` and default `council` stay on subscription-included painters; opt into Higgsfield explicitly with `--painter higgsfield` or `--with-higgsfield`.

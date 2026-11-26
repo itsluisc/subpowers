@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # grok-video: make a short video with xAI's Grok Imagine through the Grok CLI (`grok`),
-# paid for by the logged-in grok.com subscription (SuperGrok). No API key.
+# paid for by the logged-in grok.com account (The X Subscription, formerly SuperGrok). No API key.
 # A subpowers painter (https://github.com/itsluisc/subpowers), same contract as grok-image.
 #
 # HOW IT WORKS (grok 1.0.41, measured 2026-09-26):
@@ -149,7 +149,7 @@ if [[ -z "$saved" || ! -f "$saved" ]]; then
   if [[ $rc -eq 124 || $rc -eq 142 ]]; then echo "$me: timed out after ${tmo}s" >&2
   elif [[ -n "$terr" ]]; then
     echo "$me: reference_to_video failed: $terr" >&2
-    grep -qi "SuperGrok feature" <<<"$terr" && exit 4
+    grep -qiE "SuperGrok feature|X Subscription" <<<"$terr" && exit 4
     grep -qi "zero data retention" <<<"$terr" && echo "$me: fix: run grok, type /privacy and choose Opt in, or set up a video storage bucket (https://docs.x.ai/build/settings/zdr-video-storage)" >&2
   elif [[ "$(field calls)" == "0" ]]; then echo "$me: grok never called reference_to_video (exit $rc)" >&2
   else echo "$me: no video was saved (exit $rc)" >&2; fi

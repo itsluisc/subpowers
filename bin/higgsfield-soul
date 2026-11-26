@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+# higgsfield-soul: list, resolve, or train reusable Higgsfield Soul 2.0 character IDs
+# through the official `higgsfield` CLI (browser sign-in, no API key).
+#
+# Usage:
+#   higgsfield-soul list [--json]
+#   higgsfield-soul get <name-or-uuid> [--json]
+#   higgsfield-soul resolve <name-or-uuid>             # prints only the UUID (for scripts)
+#   higgsfield-soul create <name> IMG1 IMG2 IMG3 IMG4 IMG5 [IMG6..20] [--cinematic] [--wait]
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+export SUBPOWERS_BIN="$here"
+exec python3 - "$@" <<'PY'
+import json, os, shutil, subprocess, sys, tempfile
+
+me = "higgsfield-soul"
+def say(*a): print(f"{me}:", *a, file=sys.stderr)
+def usage():
+    say("usage: higgsfield-soul list [--json] | get <name-or-uuid> [--json] | resolve <name-or-uuid> | create <name> IMG1..IMG5 [--cinematic] [--wait]")
+    sys.exit(2)
+
+argv = sys.argv[1:]
+if not argv or argv[0] in ("-h", "--help"):
+    usage()
+
+hf = shutil.which("higgsfield")
+if not hf:
+    say("higgsfield CLI not installed (run: higgsfield auth login after installing)"); sys.exit(3)
+
+def cli(*args, timeout=60):
+    r = subprocess.run([hf, *args, "--json", "--no-color"], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout).strip()[-400:] or f"exit {r.returncode}"
+        if any(k in msg.lower() for k in ("not authenticated", "login", "unauthorized", "401")):
+            say(f"not signed in to Higgsfield ({msg}). Run: higgsfield auth login"); sys.exit(3)
+        raise RuntimeError(msg)
+    return json.loads(r.stdout)
+
+def find_soul(souls, query):
+    q = query.strip().lower()
+    for s in souls:
+        if (s.get("id") or "").lower() == q:
+            return s
+    exact = [s for s in souls if (s.get("name") or "").strip().lower() == q]
+    if exact:
+        return exact[0]
+    partial = [s for s in souls if q in (s.get("name") or "").lower() and s.get("status") == "completed"]
+    if len(partial) == 1:
+        return partial[0]
+    if len(partial) > 1:
+        names = ", ".join(f"{s.get('name')} ({s.get('id')})" for s in partial[:5])
+        say(f"multiple Soul IDs match '{query}': {names}. Pass the exact name or UUID."); sys.exit(2)
+    return None
+
+cmd = argv[0]
+rest = argv[1:]
+
+if cmd == "list":
+    as_json = "--json" in rest
+    try:
+        souls = cli("soul-id", "list")
+    except Exception as e:
+        say(f"could not list Soul IDs ({e})"); sys.exit(1)
+    if as_json:
+        print(json.dumps(souls, indent=2))
+    else:
+        if not souls:
+            print("No Soul IDs yet. Train one with: subpowers soul create NAME photo1..photo5")
+        else:
+            for s in souls:
+                print(f"{s.get('status','?'):10s}  {s.get('type','?'):8s}  {s.get('id','')}  {s.get('name','')}")
+    sys.exit(0)
+
+if cmd in ("get", "resolve"):
+    as_json = "--json" in rest
+    pos = [a for a in rest if a != "--json"]
+    if len(pos) != 1:
+        usage()
+    query = pos[0]
+    try:
+        souls = cli("soul-id", "list")
+    except Exception as e:
+        say(f"could not list Soul IDs ({e})"); sys.exit(1)
+    hit = find_soul(souls, query)
+    if not hit:
+        say(f"no Soul ID matches '{query}'. Run: subpowers soul list"); sys.exit(2)
+    if cmd == "resolve":
+        print(hit["id"])
+    elif as_json:
+        print(json.dumps(hit, indent=2))
+    else:
+        print(f"{hit.get('name')} ({hit.get('type')}, {hit.get('status')}) -> {hit.get('id')}")
+    sys.exit(0)
+
+if cmd == "create":
+    cinematic = False
+    wait = False
+    pos = []
+    for a in rest:
+        if a == "--cinematic": cinematic = True
+        elif a == "--wait": wait = True
+        elif a.startswith("-"): usage()
+        else: pos.append(a)
+    if len(pos) < 6 or len(pos) > 21:
+        say("soul create needs a character NAME plus 5 to 20 images"); sys.exit(2)
+    name, imgs = pos[0], pos[1:]
+    for p in imgs:
+        if not os.path.isfile(p):
+            say(f"missing image: {p}"); sys.exit(2)
+    work = tempfile.mkdtemp(prefix="higgsfield-soul.")
+    ops = [sys.executable, os.path.join(os.environ["SUBPOWERS_BIN"], "imgops")]
+    staged = []
+    for idx, p in enumerate(imgs, 1):
+        ext = os.path.splitext(p)[1].lower()
+        if ext in (".heic", ".heif"):
+            dst = os.path.join(work, f"img{idx}.jpg")
+            r = subprocess.run(ops + ["convert", p, dst], capture_output=True)
+            staged.append(dst if r.returncode == 0 and os.path.isfile(dst) else os.path.abspath(p))
+        else:
+            staged.append(os.path.abspath(p))
+    args = ["soul-id", "create", "--name", name, "--soul-cinematic" if cinematic else "--soul-2"]
+    for s in staged:
+        args += ["--image", s]
+    try:
+        created = cli(*args, timeout=180)
+    except Exception as e:
+        shutil.rmtree(work, ignore_errors=True)
+        say(f"could not create Soul ID ({e})"); sys.exit(1)
+    shutil.rmtree(work, ignore_errors=True)
+    sid = created.get("id")
+    if wait and sid:
+        say(f"training Soul ID {sid} ({name}); waiting until ready...")
+        try:
+            created = cli("soul-id", "wait", sid, timeout=1200)
+        except Exception as e:
+            say(f"created {sid}, but wait failed ({e}). Check later: subpowers soul get {sid}"); sys.exit(1)
+    print(json.dumps(created, indent=2))
+    sys.exit(0)
+
+usage()
+PY

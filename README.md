@@ -1,8 +1,8 @@
 <h1 align="center">subpowers</h1>
 
-<p align="center"><b>Your coding agent makes images on the ChatGPT, Google and Grok plans you already pay for.</b><br>
-No API key. No per-image bill. One prompt, three plans, you pick.<br>
-<sub>Needs a paid ChatGPT, Google AI or SuperGrok plan. Built and tested on a Mac.</sub></p>
+<p align="center"><b>Your coding agent makes images, avatars, and short videos on the AI subscriptions you already pay for.</b><br>
+No API key. No per-image bill. One prompt, 3 to 4 plans side-by-side, you pick.<br>
+<sub>Works with ChatGPT, Google AI (Antigravity), The X Subscription (Grok, formerly SuperGrok), and opt-in Higgsfield. Native plugin for Claude Code & Antigravity + shared MCP server for Codex, Cursor, Grok, and Hermes.</sub></p>
 
 <p align="center"><picture>
   <source media="(prefers-reduced-motion: reduce)" srcset="assets/hero-still.jpg">
@@ -26,27 +26,37 @@ Install https://github.com/itsluisc/subpowers for me, then tell me what I need t
 
 Paste the message above into your coding agent. It reads the "For AI agents" section below and does the rest. The only thing you do yourself is log in to your own account (a browser window opens once).
 
-Prefer typing it yourself? Three commands:
+Prefer typing it yourself, or installing as a native plugin?
 
+**Claude Code Plugin (skills + slash commands + MCP):**
+```text
+/plugin marketplace add itsluisc/subpowers
+/plugin install subpowers@subpowers
+```
+
+**CLI & All Harnesses (Claude Code, Antigravity, Codex, Cursor, Grok, Hermes):**
 ```bash
 git clone https://github.com/itsluisc/subpowers ~/.claude/skills/subpowers
 bash ~/.claude/skills/subpowers/install.sh
 codex login        # ChatGPT painter: choose "Sign in with ChatGPT"
 ```
 
-Using Google or Grok instead (or too)? Install their CLI and sign in once:
+Using Google, Grok, or Higgsfield instead (or all four in council mode)? Install their CLI and sign in once:
 
 ```bash
 curl -fsSL https://antigravity.google/cli/install.sh | bash   # Google (Antigravity CLI)
 agy                # sign in in the browser, then type /exit
-curl -fsSL https://x.ai/cli/install.sh | bash                # Grok (needs SuperGrok)
+curl -fsSL https://x.ai/cli/install.sh | bash                # Grok (The X Subscription, formerly SuperGrok)
 grok login
+higgsfield auth login                                        # Optional: Higgsfield (Soul 2.0 + Seedance 2.5)
 ```
 
-Then ask any agent for an image. Or type it:
+Then ask any agent for an image, avatar, or clip (or call `subpowers_*` MCP tools directly). Or type it:
 
 ```bash
 subpowers image "a red fox in a scarf on a rooftop at night" ~/Desktop/fox.png --painter council
+subpowers image "same prompt across all 4" ~/Desktop/fox.png --painter council --with-higgsfield
+subpowers avatar --from ~/Desktop/me.jpg ~/Desktop/my-sheet.png --painter council
 ```
 
 ## Council mode: every plan paints it, you pick the best
@@ -115,7 +125,7 @@ The receipt also says when an image was cropped or upscaled on your machine.
 
 **Will this get my account banned?** subpowers drives the official `codex`, `agy` and `grok` command-line tools on your own login, the same way you would by hand. API-key auth is switched off for every call, so it can only use your plan, and images count against your plan's normal limits. Use your own login on your own machine; don't share it or resell access.
 
-**Which plans work?** Tested on ChatGPT Pro, Google AI Pro and SuperGrok. A ChatGPT plan needs Codex access; Grok images need SuperGrok. `subpowers doctor` tells you what your login can do. Found a plan that works (or doesn't)? Open an issue.
+**Which plans work?** Tested on ChatGPT Pro, Google AI Pro, The X Subscription (Plus/Premium/Super/Ultra, formerly SuperGrok), and Higgsfield Ultimate. A ChatGPT plan needs Codex access; Grok images/video use The X Subscription shared weekly pool; Higgsfield CLI runs spend plan credits (Higgsfield gates free-unlimited `use_unlim` to `higgsfield.ai` web, Claude chat, Claude Cowork, and ChatGPT). `subpowers doctor` tells you what your logins can do. Found a plan that works (or doesn't)? Open an issue.
 
 **Linux or Windows?** Built and tested on macOS. Linux reports are welcome. Windows is untested.
 
@@ -132,18 +142,20 @@ The receipt also says when an image was cropped or upscaled on your machine.
 
 | | ChatGPT | Google (Nano Banana) | Grok | Higgsfield (opt-in) |
 |---|---|---|---|---|
-| You need | a ChatGPT plan with Codex access + `codex login` | a Google AI plan with Antigravity + `agy` signed in | SuperGrok + the Grok CLI + `grok login` | a Higgsfield plan + the official `higgsfield` CLI + `higgsfield auth login` |
-| Model | OpenAI's current image model (chosen by OpenAI) | Nano Banana 2 (`gemini-3.1-flash-image`, read back from the job) | Grok Imagine 2.0 (`grok-imagine-image-2.0` requested) | Nano Banana 2.1 by default (`nano_banana_2_1`); also `gpt_image_2_6`, `grok_image_2_0` |
-| Speed (measured) | 30 to 100 s (30 s on 2026-11-13) | 20 to 120 s (42 s on 2026-11-13) | 35 to 100 s (38 s on 2026-11-13) | about 25 s (24 s on 2026-11-13, one run) |
-| Shapes | square, 3:2, 2:3 exact; others requested | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 | the model's own list (Nano Banana 2.1: 1:1 to 21:9, 4:5, 5:4) |
-| Reference photos | yes, any number | yes, up to 3 | yes (image edit) | yes |
-| Cost per image | none beyond the plan | none beyond the plan | none beyond the plan | plan credits (about 1.5; priced first, refused above 2) |
+| You need | a ChatGPT plan with Codex access + `codex login` | a Google AI plan with Antigravity + `agy` signed in | The X Subscription (formerly SuperGrok) + `grok login` | a Higgsfield plan + `higgsfield auth login` |
+| Model | OpenAI's current image model (chosen by OpenAI) | Nano Banana 2 (`gemini-3.1-flash-image`, read back from the job) | Grok Imagine 2.0 (`grok-imagine-image-2.0`); video `grok-imagine-video-1.5` | `nano_banana_2_1` (~1.5 cr), `gpt_image_2_6` (~0.75 cr), `text2image_soul_v2` (~0.12 cr with `--soul-id`), video `seedance_2_5` (~35 cr) |
+| Speed (measured) | 30 to 100 s | 20 to 120 s | 35 to 100 s | ~25 s image; 1 to 3 min video |
+| Shapes | square, 3:2, 2:3 exact; others requested | 1:1, 2:3, 3:2, 3:4, 4:3, 9:16, 16:9 | 1:1, 16:9, 9:16, 3:2, 2:3 | model's own list (up to 21:9, 4:5, 5:4) |
+| Reference photos | yes, any number | yes, up to 3 | yes (image edit) | yes (`--image-references` or `--soul-id`) |
+| Cost per image | included in plan | included in plan | included in plan | plan credits (priced first, capped; Soul 2.0 ~0.12 cr) |
 
 </details>
 
-`subpowers image` uses ChatGPT when it's connected, then Google, then Grok. Pick one with `--painter chatgpt|google|grok`, all of them with `--painter council`, or set `SUBPOWERS_PAINTER`. Higgsfield spends credits per image, so it is never picked by `auto` or `council`: ask for it with `--painter higgsfield`. Every painter runs with API-key auth switched off, so it can only ever use your plan.
+`subpowers image` uses ChatGPT when it's connected, then Google, then Grok. Pick one with `--painter chatgpt|google|grok`, all of them with `--painter council`, or include Higgsfield as a 4th option with `--painter council --with-higgsfield` (or `SUBPOWERS_COUNCIL_PAINTERS`). Default `auto` and `council` never spend Higgsfield credits silently. Every painter runs with API-key auth switched off, so it can only ever use your plan.
 
-**Video.** `subpowers video "<prompt>" out.mp4` makes a short clip with sound on your SuperGrok plan (Grok Imagine video 1.5 as the grok CLI asks for it, 1 to 15 s, 480p or 720p). Give it a first frame with `--first img.png`, people or products with `--ref`/`--refs`, or nothing at all and it paints the first frame for you on your image plan, then animates it. Accounts in Grok's privacy mode (`/privacy` set to Opt out) need to opt in or add a video storage bucket first. Google's Gemini Omni video is on the [roadmap](ROADMAP.md).
+**Video.** `subpowers video "<prompt>" out.mp4` makes a short clip with sound on The X Subscription (`grok-imagine-video-1.5`, 1 to 15 s, 480p or 720p), or pass `--painter higgsfield [--model seedance_2_5|kling4_0|veo3_1]` for Higgsfield video (priced first, capped at `HIGGSFIELD_VIDEO_MAX_CREDITS`). Give it a first frame with `--first img.png`, people or products with `--ref`/`--refs`, or nothing at all and Grok mode paints the first frame on your image plan first.
+
+**Avatars & Soul IDs.** `subpowers avatar --from photo.jpg sheet.png --painter council` builds a 5-view character turnaround sheet on flat **dark neutral gray (`#3A3A3C`)** with shadowless light (avoiding white reflector glare and black hair crush in downstream scenes and video). Train reusable Higgsfield Soul 2.0 IDs with `subpowers soul create NAME p1..p5` and reuse them via `--soul-id NAME` (~0.12 credits/image).
 
 **Stop-motion.** `subpowers stopmotion "a small clay fox tiptoes across a felt meadow and waves" out.mp4` plans the frames on your subscription, paints frame 1, then paints every other frame from frame 1 so the set and the character stay put, and hands back an mp4 plus a looping webp. `--resume` picks up after a spent quota without repainting what is done.
 
@@ -191,9 +203,19 @@ GROK_IMAGE_MODEL=                   # empty = xAI's default Imagine model instea
 <details>
 <summary>Use it in Cursor, Gemini CLI, or any agent's rules</summary>
 
-- **Claude Code**: automatic. It loads `~/.claude/skills/subpowers` at startup (restart open sessions).
-- **Codex**: automatic, via `~/.codex/skills` and `~/.agents/skills` (the installer links both).
-- **Cursor, Gemini CLI, custom agents, your `AGENTS.md` / `CLAUDE.md`**: paste this block into the agent's rules:
+- **Claude Code**: automatic via `~/.claude/skills/subpowers`, OR install as a native plugin (`/plugin marketplace add itsluisc/subpowers`, `/plugin install subpowers@subpowers`) which loads `.mcp.json`, slash commands (`/paint`, `/council`, `/avatar`, `/video`, `/doctor`), and `skills/subpowers/SKILL.md` (macOS/Linux symlink).
+- **Antigravity**: loads `plugin.json`, `mcp_config.json`, `rules/subpowers.mdc`, and `~/.gemini/config/skills/subpowers`.
+- **Codex**: automatic skill via `~/.codex/skills` + `~/.agents/skills`. To add the shared MCP server to `~/.codex/config.toml`:
+```toml
+[mcp_servers.subpowers]
+command = "python3"
+args = ["/Users/<you>/.local/bin/subpowers-mcp"]
+```
+- **Cursor**: skill linked at `~/.cursor/skills/subpowers` and rule at `~/.cursor/rules/subpowers.mdc`. To add MCP to `~/.cursor/mcp.json`:
+```json
+{ "mcpServers": { "subpowers": { "command": "python3", "args": ["/Users/<you>/.local/bin/subpowers-mcp"] } } }
+```
+- **Grok CLI, Hermes, GrokBot, and custom agents**: `install.sh` links `~/.grok/skills/subpowers` and `~/.hermes/skills/subpowers` when present, and puts `subpowers` + `subpowers-mcp` on `~/.local/bin` so any shell-capable or MCP-capable agent (including GrokBot via shell) can run it. Or paste this block into your `AGENTS.md` / `CLAUDE.md`:
 
 ```markdown
 ## Making images

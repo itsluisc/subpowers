@@ -1,0 +1,608 @@
+#!/usr/bin/env python3
+"""subpowers-mcp: zero-dependency stdio MCP server for subpowers.
+
+Works with Claude Code, Antigravity, Codex, Cursor, Grok, Hermes, and any
+JSON-RPC 2.0 MCP client. Supports both newline-delimited JSON (MCP stdio spec)
+and Content-Length framed messages automatically.
+"""
+import json
+import os
+import signal
+import subprocess
+import sys
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+SUBPOWERS = os.path.join(HERE, "subpowers")
+DOCTOR = os.path.join(HERE, "doctor")
+HF_SOUL = os.path.join(HERE, "higgsfield-soul")
+
+SERVER_INFO = {
+    "name": "subpowers",
+    "version": "0.5.0",
+}
+
+SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+
+TOOLS = [
+    {
+        "name": "subpowers_powers",
+        "description": (
+            "List connected subscription painters (ChatGPT, Antigravity, Grok via The X Subscription, "
+            "and opt-in Higgsfield)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_doctor",
+        "description": (
+            "Live-check every subscription CLI, login status, model freshness, MCP readiness, "
+            "and linked agent skill directories."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_image",
+        "description": (
+            "Generate an image or a multi-painter council (3-4 side-by-side options to choose from) "
+            "using connected subscriptions (ChatGPT, Antigravity, Grok, or opt-in Higgsfield). "
+            "Supports photo references, saved reference sets, video set-matching (--match-set), "
+            "Higgsfield Soul IDs (--soul-id), and mounting straight into a HyperFrames project."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Visual prompt describing camera, light, subject, and mood."},
+                "output_path": {"type": "string", "description": "Absolute destination path (.png, .jpg, or .webp). Optional when into_project is set."},
+                "painter": {
+                    "type": "string",
+                    "enum": ["auto", "chatgpt", "antigravity", "grok", "council", "higgsfield"],
+                    "default": "auto",
+                    "description": "auto (first connected), council (all connected side-by-side), or a specific painter.",
+                },
+                "with_higgsfield": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "When painter='council', also include Higgsfield as a 4th option (spends Higgsfield plan credits).",
+                },
+                "size": {"type": "string", "description": "Target pixel size like 1536x1024, 1080x1920, or 1024x1024."},
+                "model": {"type": "string", "description": "Higgsfield-only model override (e.g. text2image_soul_v2, gpt_image_2_6, nano_banana_2_1)."},
+                "soul_id": {"type": "string", "description": "Higgsfield Soul 2.0 character name or UUID (auto-uses text2image_soul_v2 unless model is set)."},
+                "style_id": {"type": "string", "description": "Optional Higgsfield Soul style UUID."},
+                "refs": {"type": "string", "description": "Saved reference set name (from subpowers_refs)."},
+                "ref_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Absolute local paths to reference images (face, room/environment, product, brand logo).",
+                },
+                "match_set": {"type": "string", "description": "Video path (optional @seconds) to extract a person-free set plate for lighting and palette."},
+                "into_project": {"type": "string", "description": "Optional HyperFrames project directory to mount the result into as a layer."},
+                "at": {"type": "number", "description": "Start time in seconds when using into_project."},
+                "duration": {"type": "number", "description": "Layer duration in seconds when using into_project."},
+                "layer_name": {"type": "string", "description": "Layer name when using into_project."},
+                "place": {"type": "string", "description": "Placement when using into_project: lower, full, or box:x,y,w,h."},
+                "snapshot": {"type": "boolean", "default": False, "description": "Take a HyperFrames snapshot after mounting into_project."},
+            },
+            "required": ["prompt"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_avatar",
+        "description": (
+            "Generate a studio character turnaround sheet (front, left profile, right 3/4, back, face close-up) "
+            "on flat dark neutral gray (#3A3A3C) with shadowless studio light so the avatar drops cleanly into "
+            "any downstream image or video scene. Supports council mode for multiple options."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "output_path": {"type": "string", "description": "Absolute destination path (.png or .jpg)."},
+                "refs": {"type": "string", "description": "Saved reference set name for the person."},
+                "ref_paths": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Direct local photo path(s) of the person (used if refs is omitted).",
+                },
+                "painter": {
+                    "type": "string",
+                    "enum": ["auto", "chatgpt", "antigravity", "grok", "council", "higgsfield"],
+                    "default": "council",
+                    "description": "Default council paints 3-4 options side-by-side so the user picks the best sheet.",
+                },
+                "with_higgsfield": {"type": "boolean", "default": False, "description": "Include Higgsfield as a 4th option in council mode."},
+                "style": {
+                    "type": "string",
+                    "enum": ["photoreal", "3d-toon"],
+                    "default": "photoreal",
+                    "description": "photoreal (default studio turnaround) or 3d-toon (stylized avatar sheet).",
+                },
+                "size": {"type": "string", "default": "1536x1024", "description": "Sheet size, default 1536x1024."},
+            },
+            "required": ["output_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_video",
+        "description": (
+            "Generate a short video clip with sound using Grok Imagine 1.5 (default, included in The X Subscription) "
+            "or Higgsfield Video (opt-in, e.g. seedance_2_5, kling4_0, veo3_1, priced first and capped)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string", "description": "Motion and scene description."},
+                "output_path": {"type": "string", "description": "Absolute destination .mp4 path. Optional when into_project is set."},
+                "painter": {
+                    "type": "string",
+                    "enum": ["grok", "higgsfield"],
+                    "default": "grok",
+                    "description": "grok (default, X Subscription) or higgsfield (opt-in, spends Higgsfield plan credits).",
+                },
+                "model": {"type": "string", "description": "Higgsfield-only video model (default seedance_2_5; e.g. kling4_0, veo3_1, grok_video_v15)."},
+                "first_frame": {"type": "string", "description": "Absolute path to pinned first frame image."},
+                "last_frame": {"type": "string", "description": "Absolute path to pinned last frame image."},
+                "refs": {"type": "string", "description": "Saved reference set name."},
+                "ref_paths": {"type": "array", "items": {"type": "string"}, "description": "Reference image paths."},
+                "voice": {"type": "string", "description": "Grok-only preset voice (e.g. ara, eve, leo, rex)."},
+                "duration": {"type": "integer", "description": "Clip duration in seconds (1-15 for Grok; model-dependent for Higgsfield)."},
+                "aspect": {"type": "string", "default": "16:9", "description": "Aspect ratio like 16:9, 9:16, 1:1."},
+                "resolution": {"type": "string", "description": "Resolution like 720p or 1080p (Grok supports 480p|720p)."},
+                "into_project": {"type": "string", "description": "Optional HyperFrames project folder to mount the clip into."},
+                "at": {"type": "number", "description": "Start time in seconds when using into_project."},
+                "place": {"type": "string", "description": "Placement when using into_project: lower, full, or box:x,y,w,h."},
+                "keep_audio": {"type": "boolean", "default": False, "description": "Keep clip audio when mounting into_project."},
+                "snapshot": {"type": "boolean", "default": False, "description": "Take a HyperFrames snapshot after mounting."},
+            },
+            "required": ["prompt"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_refs",
+        "description": "Manage saved local reference sets (people, products, rooms/environments, brands) under ~/.subpowers/refs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "add", "path"], "default": "list"},
+                "name": {"type": "string", "description": "Reference set name (required for add/path, optional filter for list)."},
+                "files": {"type": "array", "items": {"type": "string"}, "description": "Local image paths to add (required when action='add')."},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_soul",
+        "description": "List, inspect, or train reusable Higgsfield Soul 2.0 / Soul Cinematic character IDs via the logged-in higgsfield CLI.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["list", "get", "create"], "default": "list"},
+                "name": {"type": "string", "description": "Character name (for create or get lookup)."},
+                "soul_id": {"type": "string", "description": "Soul UUID or name (for get)."},
+                "images": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "5 to 20 local image paths for training a new Soul ID (action='create').",
+                },
+                "cinematic": {"type": "boolean", "default": False, "description": "Train Soul Cinematic instead of Soul 2.0."},
+                "wait": {"type": "boolean", "default": False, "description": "Wait for training completion (takes ~10 min)."},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+]
+
+
+def expect_str_list(args, key):
+    val = args.get(key)
+    if val is None:
+        return []
+    if not isinstance(val, list) or not all(isinstance(x, str) for x in val):
+        raise ValueError(f"'{key}' must be an array of strings")
+    return val
+
+
+def run_cmd(cmd, timeout=900):
+    env = os.environ.copy()
+    env["SUBPOWERS_NO_AUTOUPDATE"] = env.get("SUBPOWERS_NO_AUTOUPDATE", "1")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        return proc.returncode, (out or "").strip(), (err or "").strip()
+    except subprocess.TimeoutExpired:
+        # Kill the entire process group so background council/Higgsfield painters do not keep running.
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+            try:
+                proc.communicate(timeout=3)
+            except subprocess.TimeoutExpired:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.communicate(timeout=3)
+        except Exception:
+            proc.kill()
+        return 124, "", f"command timed out after {timeout}s (process group terminated)"
+    except Exception as exc:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except Exception:
+            pass
+        return 1, "", str(exc)
+
+
+def read_receipt_for(paths):
+    for p in paths:
+        stem = os.path.splitext(p)[0]
+        rec = stem + ".prompt.txt"
+        if os.path.isfile(rec):
+            try:
+                with open(rec, "r", encoding="utf-8", errors="replace") as f:
+                    return f.read(4000)
+            except Exception:
+                pass
+    return None
+
+
+def handle_tool(name, args):
+    if args is None:
+        args = {}
+    if not isinstance(args, dict):
+        return False, {"error": "tool 'arguments' must be a JSON object"}
+
+    if name == "subpowers_powers":
+        rc, out, err = run_cmd(["bash", SUBPOWERS, "powers"], timeout=60)
+        return rc == 0, {"ok": rc == 0, "powers": out.splitlines() if out else [], "stderr": err}
+
+    if name == "subpowers_doctor":
+        rc, out, err = run_cmd(["bash", DOCTOR], timeout=180)
+        return rc == 0, {"ok": rc == 0, "report": out, "stderr": err}
+
+    if name == "subpowers_refs":
+        action = args.get("action", "list")
+        cmd = ["bash", SUBPOWERS, "refs", str(action)]
+        if action in ("add", "path"):
+            if not args.get("name"):
+                return False, {"error": f"refs {action} requires 'name'"}
+            cmd.append(str(args["name"]))
+            if action == "add":
+                files = expect_str_list(args, "files")
+                if not files:
+                    return False, {"error": "refs add requires non-empty 'files' array"}
+                cmd.extend(files)
+        elif args.get("name"):
+            cmd.append(str(args["name"]))
+        rc, out, err = run_cmd(cmd, timeout=60)
+        return rc == 0, {"ok": rc == 0, "items": [l for l in out.splitlines() if l], "stderr": err}
+
+    if name == "subpowers_soul":
+        action = args.get("action", "list")
+        if action == "list":
+            rc, out, err = run_cmd(["bash", HF_SOUL, "list", "--json"], timeout=45)
+            data = out
+            try:
+                data = json.loads(out)
+            except Exception:
+                pass
+            return rc == 0, {"ok": rc == 0, "souls": data, "stderr": err}
+        if action == "get":
+            target = args.get("soul_id") or args.get("name")
+            if not target:
+                return False, {"error": "soul get requires 'soul_id' or 'name'"}
+            rc, out, err = run_cmd(["bash", HF_SOUL, "get", str(target), "--json"], timeout=45)
+            data = out
+            try:
+                data = json.loads(out)
+            except Exception:
+                pass
+            return rc == 0, {"ok": rc == 0, "soul": data, "stderr": err}
+        if action == "create":
+            cname = args.get("name")
+            imgs = expect_str_list(args, "images")
+            if not cname or len(imgs) < 5:
+                return False, {"error": "soul create requires 'name' and 5 to 20 image paths"}
+            cmd = ["bash", HF_SOUL, "create", str(cname), *imgs]
+            if args.get("cinematic"):
+                cmd.append("--cinematic")
+            if args.get("wait"):
+                cmd.append("--wait")
+            rc, out, err = run_cmd(cmd, timeout=900 if args.get("wait") else 120)
+            return rc == 0, {"ok": rc == 0, "output": out, "stderr": err}
+        return False, {"error": f"unknown soul action: {action}"}
+
+    if name == "subpowers_image":
+        prompt = args.get("prompt")
+        if not prompt or not isinstance(prompt, str):
+            return False, {"error": "'prompt' must be a non-empty string"}
+        out_path = args.get("output_path")
+        into = args.get("into_project")
+        if not out_path and not into:
+            return False, {"error": "provide 'output_path' or 'into_project'"}
+        ref_paths = expect_str_list(args, "ref_paths")
+        painter = args.get("painter")
+        hf_only_used = any(args.get(k) for k in ("model", "soul_id", "style_id"))
+        if hf_only_used:
+            if not painter or painter == "auto":
+                painter = "higgsfield"
+            elif painter not in ("higgsfield", "council"):
+                return False, {"error": "model, soul_id, and style_id require painter='higgsfield' or painter='council' with with_higgsfield=true"}
+        cmd = ["bash", SUBPOWERS, "image", prompt]
+        if out_path:
+            cmd.append(str(out_path))
+        if painter:
+            cmd.extend(["--painter", str(painter)])
+        if args.get("with_higgsfield"):
+            cmd.append("--with-higgsfield")
+        if args.get("size"):
+            cmd.extend(["--size", str(args["size"])])
+        if args.get("model"):
+            cmd.extend(["--model", str(args["model"])])
+        if args.get("soul_id"):
+            cmd.extend(["--soul-id", str(args["soul_id"])])
+        if args.get("style_id"):
+            cmd.extend(["--style-id", str(args["style_id"])])
+        if args.get("refs"):
+            cmd.extend(["--refs", str(args["refs"])])
+        for rp in ref_paths:
+            cmd.extend(["--ref", rp])
+        if args.get("match_set"):
+            cmd.extend(["--match-set", str(args["match_set"])])
+        if into:
+            cmd.extend(["--into", str(into)])
+            if args.get("at") is not None:
+                cmd.extend(["--at", str(args["at"])])
+            if args.get("duration") is not None:
+                cmd.extend(["--duration", str(args["duration"])])
+            if args.get("layer_name"):
+                cmd.extend(["--layer-name", str(args["layer_name"])])
+            if args.get("place"):
+                cmd.extend(["--place", str(args["place"])])
+            if args.get("snapshot"):
+                cmd.append("--snapshot")
+        rc, out, err = run_cmd(cmd, timeout=900)
+        lines = [l for l in out.splitlines() if l.strip()]
+        sheet = next((l for l in lines if l.endswith("-all.jpg")), None)
+        return rc == 0, {
+            "ok": rc == 0,
+            "paths": lines,
+            "contact_sheet": sheet,
+            "receipt": read_receipt_for(lines),
+            "stderr": err,
+        }
+
+    if name == "subpowers_avatar":
+        out_path = args.get("output_path")
+        if not out_path or not isinstance(out_path, str):
+            return False, {"error": "'output_path' must be a non-empty string"}
+        refs_name = args.get("refs")
+        ref_paths = expect_str_list(args, "ref_paths")
+        if not refs_name and not ref_paths:
+            return False, {"error": "provide 'refs' (saved reference set) or 'ref_paths' (local photos array)"}
+        cmd = ["bash", SUBPOWERS, "avatar"]
+        if refs_name:
+            cmd.extend([str(refs_name), out_path])
+        else:
+            cmd.extend(["--from", ref_paths[0], out_path])
+            for extra in ref_paths[1:]:
+                cmd.extend(["--ref", extra])
+        painter = args.get("painter", "council")
+        if painter:
+            cmd.extend(["--painter", str(painter)])
+        if args.get("with_higgsfield"):
+            cmd.append("--with-higgsfield")
+        if args.get("style"):
+            cmd.extend(["--style", str(args["style"])])
+        if args.get("size"):
+            cmd.extend(["--size", str(args["size"])])
+        rc, out, err = run_cmd(cmd, timeout=900)
+        lines = [l for l in out.splitlines() if l.strip()]
+        sheet = next((l for l in lines if l.endswith("-all.jpg")), None)
+        return rc == 0, {
+            "ok": rc == 0,
+            "paths": lines,
+            "contact_sheet": sheet,
+            "background": "#3A3A3C (flat dark neutral gray)",
+            "downstream_tip": "When placing this avatar into a real scene, include 'do not copy the plain gray background'.",
+            "stderr": err,
+        }
+
+    if name == "subpowers_video":
+        prompt = args.get("prompt")
+        if not prompt or not isinstance(prompt, str):
+            return False, {"error": "'prompt' must be a non-empty string"}
+        out_path = args.get("output_path")
+        into = args.get("into_project")
+        if not out_path and not into:
+            return False, {"error": "provide 'output_path' or 'into_project'"}
+        ref_paths = expect_str_list(args, "ref_paths")
+        painter = args.get("painter") or ("higgsfield" if args.get("model") else "grok")
+        if painter == "higgsfield" and args.get("voice"):
+            return False, {"error": "'voice' is Grok-only and not supported with painter='higgsfield'"}
+        if painter == "grok" and args.get("model"):
+            return False, {"error": "'model' is Higgsfield-only; pass painter='higgsfield'"}
+        cmd = ["bash", SUBPOWERS, "video", prompt]
+        if out_path:
+            cmd.append(str(out_path))
+        cmd.extend(["--painter", str(painter)])
+        if args.get("model"):
+            cmd.extend(["--model", str(args["model"])])
+        if args.get("first_frame"):
+            cmd.extend(["--first", str(args["first_frame"])])
+        if args.get("last_frame"):
+            cmd.extend(["--last", str(args["last_frame"])])
+        if args.get("refs"):
+            cmd.extend(["--refs", str(args["refs"])])
+        for rp in ref_paths:
+            cmd.extend(["--ref", rp])
+        if args.get("voice"):
+            cmd.extend(["--voice", str(args["voice"])])
+        if args.get("duration") is not None:
+            cmd.extend(["--duration", str(args["duration"])])
+        if args.get("aspect"):
+            cmd.extend(["--aspect", str(args["aspect"])])
+        if args.get("resolution"):
+            cmd.extend(["--resolution", str(args["resolution"])])
+        if into:
+            cmd.extend(["--into", str(into)])
+            if args.get("at") is not None:
+                cmd.extend(["--at", str(args["at"])])
+            if args.get("place"):
+                cmd.extend(["--place", str(args["place"])])
+            if args.get("keep_audio"):
+                cmd.append("--keep-audio")
+            if args.get("snapshot"):
+                cmd.append("--snapshot")
+        rc, out, err = run_cmd(cmd, timeout=1200)
+        lines = [l for l in out.splitlines() if l.strip()]
+        return rc == 0, {
+            "ok": rc == 0,
+            "exit_code": rc,
+            "paths": lines,
+            "receipt": read_receipt_for(lines),
+            "stderr": err,
+        }
+
+    return False, {"error": f"unknown tool: {name}"}
+
+
+def read_message(stream):
+    """Read one JSON-RPC message; auto-detect Content-Length or newline-delimited JSON."""
+    while True:
+        line = stream.readline()
+        if not line:
+            return None, None
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if stripped.startswith(b"{"):
+            return json.loads(stripped.decode("utf-8")), "jsonl"
+        headers = {}
+        cur = line
+        while cur and cur.strip():
+            if b":" in cur:
+                k, v = cur.decode("utf-8", errors="replace").split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+            cur = stream.readline()
+        length = int(headers.get("content-length", "0"))
+        if length <= 0:
+            continue
+        body = stream.read(length)
+        if not body:
+            return None, None
+        return json.loads(body.decode("utf-8")), "framed"
+
+
+def write_message(stream, payload, mode):
+    raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    if mode == "framed":
+        header = f"Content-Length: {len(raw)}\r\n\r\n".encode("ascii")
+        stream.write(header + raw)
+    else:
+        stream.write(raw + b"\n")
+    stream.flush()
+
+
+def dispatch(msg):
+    if not isinstance(msg, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Invalid Request: expected JSON object"},
+        }
+    method = msg.get("method")
+    req_id = msg.get("id")
+    params = msg.get("params") or {}
+    if not isinstance(params, dict):
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32602, "message": "Invalid params: expected JSON object"},
+        }
+
+    # Notifications have no id and expect no reply.
+    if req_id is None:
+        return None
+
+    if method == "initialize":
+        client_ver = params.get("protocolVersion") or "2024-11-05"
+        proto = client_ver if client_ver in SUPPORTED_PROTOCOLS else "2024-11-05"
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": proto,
+                "capabilities": {"tools": {"listChanged": False}},
+                "serverInfo": SERVER_INFO,
+            },
+        }
+
+    if method == "ping":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+
+    if method == "tools/list":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {"tools": TOOLS}}
+
+    if method == "tools/call":
+        tname = params.get("name", "")
+        targs = params.get("arguments")
+        try:
+            ok, payload = handle_tool(tname, targs)
+        except ValueError as exc:
+            ok, payload = False, {"error": str(exc)}
+        except Exception as exc:
+            ok, payload = False, {"error": f"internal tool error: {exc}"}
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
+                "isError": not ok,
+            },
+        }
+
+    return {
+        "jsonrpc": "2.0",
+        "id": req_id,
+        "error": {"code": -32601, "message": f"Method not found: {method}"},
+    }
+
+
+def main():
+    stdin = sys.stdin.buffer
+    stdout = sys.stdout.buffer
+    while True:
+        try:
+            msg, mode = read_message(stdin)
+        except Exception as exc:
+            err_resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {exc}"},
+            }
+            write_message(stdout, err_resp, "jsonl")
+            continue
+        if msg is None:
+            break
+        resp = dispatch(msg)
+        if resp is not None:
+            write_message(stdout, resp, mode or "jsonl")
+
+
+if __name__ == "__main__":
+    main()

@@ -2,6 +2,24 @@
 
 One line per change, with the why. Newest first.
 
+## [0.5.0] - 2026-11-25
+
+### Added
+- **Universal Dual Plugin (Claude Code + Antigravity + Codex + Cursor + Grok + Hermes):** `.claude-plugin/{plugin.json,marketplace.json}`, `.mcp.json`, `commands/{paint,council,avatar,video,doctor}.md`, root `plugin.json`, `mcp_config.json`, `assets/icon.svg`, `rules/subpowers.mdc`, and `skills/subpowers/SKILL.md`.
+- **Shared Zero-Dependency Stdio MCP Server (`bin/subpowers-mcp`):** pure Python 3 JSON-RPC 2.0 server supporting both newline-delimited JSON and `Content-Length` framing, exposing `subpowers_powers`, `subpowers_doctor`, `subpowers_image`, `subpowers_avatar`, `subpowers_video`, `subpowers_refs`, and `subpowers_soul`.
+- **Higgsfield Soul IDs & Video:** `--soul-id NAME_OR_UUID` + `--style-id` in `bin/higgsfield-image` (auto-routes to `text2image_soul_v2`, ~0.12 credits, respecting `1.5k`/`2k` quality enum and 1-ref limit), `bin/higgsfield-soul` (`subpowers soul list|get|create`), and `bin/higgsfield-video` (`subpowers video --painter higgsfield`, default `seedance_2_5`, auto `omni_reference`/`t2v` mode selection, priced first and capped by `HIGGSFIELD_VIDEO_MAX_CREDITS`).
+- **4-Painter Council opt-in:** `--with-higgsfield` on `subpowers image --painter council` and `SUBPOWERS_COUNCIL_PAINTERS` config override, while keeping default `auto` and `council` strictly free of Higgsfield credit spend.
+- **Dark Neutral Gray (`#3A3A3C`) Avatar Turnaround Sheets:** `subpowers avatar` (alias for `sheet`) supports `--from IMG` (single-photo shortcut) and `--style photoreal|3d-toon`, using flat `#3A3A3C` neutral gray shadowless lighting for clean downstream scene relighting.
+- **`install.sh --link` & multi-harness wiring:** symlinks into `~/.gemini/config/skills`, `~/.cursor/skills`, `~/.grok/skills`, and `~/.hermes/skills` when present, and links `subpowers-mcp`, `grok-video`, `higgsfield-image`, `higgsfield-video`, and `higgsfield-soul` into `~/.local/bin`.
+
+### Changed
+- Updated Grok / xAI subscription wording and error matching for **The X Subscription** (formerly SuperGrok, Oct 2026 rename) across CLI, doctor, installer, SKILL.md, and README.
+- Documented honest Higgsfield Unlimited (`use_unlim`) boundary: Higgsfield gates free-unlimited server-side to web, Claude chat, Claude Cowork, and ChatGPT; CLI calls always price credits transparently first.
+
+### Fixed
+- `bin/grok-video` executable permission bit (`+x`).
+- `bin/higgsfield-image` quality enum validation so models like `text2image_soul_v2` (`1.5k`/`2k`) no longer receive invalid `--quality high`.
+
 ## [0.4.0] - 2026-11-13
 
 ### Added

@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# higgsfield-video: generate a video on the user's own Higgsfield plan through the official
+# `higgsfield` CLI (browser sign-in, no API key). Same contract as grok-video and higgsfield-image.
+#
+# HOW IT WORKS (higgsfield 1.2.2):
+#   model    default seedance_2_5 (supports text-to-video and omni_reference with up to 30 images,
+#            audio, start/end frames). Also works with seedance_2_0, kling4_0, veo3_1, grok_video_v15,
+#            minimax_h3, and any job_type listed by `higgsfield model list --video`.
+#   cost     Higgsfield spends plan CREDITS per video. Before generating, `higgsfield generate cost`
+#            prices the job; above HIGGSFIELD_VIDEO_MAX_CREDITS (default 40) it refuses and spends
+#            nothing. Note: Higgsfield gates free-unlimited (use_unlim) to web / Claude chat /
+#            Claude Cowork / ChatGPT; CLI runs spend plan credits transparently.
+#
+# Usage:
+#   higgsfield-video "<prompt>" <out.mp4> [--model JOB_TYPE] [--first IMG] [--last IMG]
+#                    [--ref IMG]... [--duration S] [--aspect R] [--resolution RES] [--no-audio]
+#
+# Env: HIGGSFIELD_VIDEO_MODEL (default seedance_2_5), HIGGSFIELD_VIDEO_MAX_CREDITS (default 40),
+#      HIGGSFIELD_VIDEO_RESOLUTION (optional), HIGGSFIELD_VIDEO_TIMEOUT (seconds, default 1200).
+#
+# Exit: 0 delivered, 1 failed before billing, 2 usage, 3 not connected, 5 submitted/paid but not delivered.
+set -euo pipefail
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cfg="${SUBPOWERS_HOME:-$HOME/.subpowers}/config"
+if [[ -f "$cfg" ]]; then
+  while IFS='=' read -r k v || [[ -n "$k" ]]; do
+    case "$k" in HIGGSFIELD_VIDEO_MODEL|HIGGSFIELD_VIDEO_MAX_CREDITS|HIGGSFIELD_VIDEO_TIMEOUT|HIGGSFIELD_VIDEO_RESOLUTION)
+      v="${v%\"}"; v="${v#\"}"
+      [[ -z "${!k:-}" ]] && export "$k=$v" ;; esac
+  done <"$cfg"
+fi
+export SUBPOWERS_BIN="$here"
+exec python3 - "$@" <<'PY'
+import json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
+
+me = "higgsfield-video"
+def say(*a): print(f"{me}:", *a, file=sys.stderr)
+def usage():
+    say('usage: higgsfield-video "<prompt>" <out.mp4> [--model JOB_TYPE] [--first IMG] [--last IMG] [--ref IMG]... [--duration S] [--aspect R] [--resolution RES] [--no-audio]')
+    sys.exit(2)
+
+argv = sys.argv[1:]
+if len(argv) < 2: usage()
+prompt, out = argv[0], argv[1]
+model = os.environ.get("HIGGSFIELD_VIDEO_MODEL") or "seedance_2_5"
+first = last = aspect = duration = None
+resolution = os.environ.get("HIGGSFIELD_VIDEO_RESOLUTION") or None
+refs = []
+no_audio = False
+i = 2
+while i < len(argv):
+    a = argv[i]
+    if a in ("--model", "--first", "--last", "--ref", "--duration", "--aspect", "--resolution", "--driver") and i + 1 < len(argv):
+        v = argv[i + 1]
+        if a == "--model": model = v
+        elif a == "--first": first = v
+        elif a == "--last": last = v
+        elif a == "--ref": refs.append(v)
+        elif a == "--duration": duration = v
+        elif a == "--aspect": aspect = v
+        elif a == "--resolution": resolution = v
+        i += 2
+    elif a == "--no-audio":
+        no_audio = True; i += 1
+    elif a in ("-h", "--help"):
+        usage()
+    else:
+        say(f"unknown arg: {a}"); usage()
+
+if not prompt.strip():
+    say("empty prompt"); sys.exit(2)
+for p in [first, last, *refs]:
+    if p and not os.path.isfile(p):
+        say(f"missing media file: {p}"); sys.exit(2)
+
+cap = float(os.environ.get("HIGGSFIELD_VIDEO_MAX_CREDITS") or 40)
+tmo = int(os.environ.get("HIGGSFIELD_VIDEO_TIMEOUT") or 1200)
+hf = shutil.which("higgsfield")
+if not hf:
+    say("the higgsfield CLI is not installed (install higgsfield, then: higgsfield auth login)"); sys.exit(3)
+
+def cli(*args, timeout=60):
+    r = subprocess.run([hf, *args, "--json", "--no-color"], capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        raise RuntimeError((r.stderr or r.stdout).strip()[-400:] or f"exit {r.returncode}")
+    return json.loads(r.stdout)
+
+def balance():
+    try: return float(cli("account", "status").get("credits"))
+    except Exception: return None
+
+def extract_job_ids(text):
+    ids = []
+    if not text:
+        return ids
+    try:
+        parsed = json.loads(text)
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
+            if isinstance(item, dict) and item.get("id"):
+                ids.append(str(item["id"]))
+    except Exception:
+        pass
+    if not ids:
+        ids = re.findall(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", text)
+    return ids
+
+t0 = time.time()
+try:
+    st = cli("account", "status")
+except Exception as e:
+    say(f"not signed in to Higgsfield ({e}). Run: higgsfield auth login"); sys.exit(3)
+before = st.get("credits"); plan = st.get("subscription_plan_type") or "?"
+
+try:
+    spec = cli("model", "get", model)
+    params = {p["name"]: p for p in spec.get("params") or []}
+except Exception as e:
+    say(f"Higgsfield does not list video model '{model}' ({e}). See: higgsfield model list --video"); sys.exit(2)
+
+has_media = bool(first or last or refs)
+job = ["--prompt", prompt]
+
+# Honor mode rules (e.g. seedance_2_5 requires mode=omni_reference when media is attached, t2v otherwise).
+if "mode" in params:
+    mode_enum = params["mode"].get("enum") or []
+    if has_media and "omni_reference" in mode_enum:
+        job += ["--mode", "omni_reference"]
+    elif not has_media and "t2v" in mode_enum:
+        job += ["--mode", "t2v"]
+
+if aspect and "aspect_ratio" in params:
+    enum = params["aspect_ratio"].get("enum") or []
+    if enum and aspect not in enum:
+        say(f"--aspect must be one of {' '.join(enum)} for {model}"); sys.exit(2)
+    job += ["--aspect_ratio", aspect]
+if duration and "duration" in params:
+    job += ["--duration", str(duration)]
+if resolution and "resolution" in params:
+    enum = params["resolution"].get("enum") or []
+    if enum and resolution not in enum:
+        say(f"--resolution must be one of {' '.join(enum)} for {model}"); sys.exit(2)
+    job += ["--resolution", resolution]
+if no_audio and "generate_audio" in params:
+    job += ["--generate_audio", "false"]
+
+if first:
+    if "start_image" in params: job += ["--start-image", os.path.abspath(first)]
+    else: job += ["--image-references", os.path.abspath(first)]
+if last and "end_image" in params:
+    job += ["--end-image", os.path.abspath(last)]
+for r in refs:
+    ext = os.path.splitext(r)[1].lower()
+    if ext in (".mp4", ".mov", ".webm") and "video_references" in params:
+        job += ["--video-references", os.path.abspath(r)]
+    else:
+        job += ["--image-references", os.path.abspath(r)]
+
+try:
+    est = float(cli("generate", "cost", model, *job, timeout=120).get("credits"))
+except Exception as e:
+    say(f"could not price the video job ({e})"); sys.exit(1)
+if est > cap:
+    say(f"{model} would cost {est} credits, over the cap of {cap} (HIGGSFIELD_VIDEO_MAX_CREDITS). Nothing was spent."); sys.exit(1)
+if before is not None and float(before) < est:
+    say(f"dry (quota): {before} credits left, the video needs {est}."); sys.exit(1)
+
+t1 = time.time()
+try:
+    r = subprocess.run([hf, "generate", "create", model, *job, "--wait", "--wait-timeout", f"{tmo}s", "--json", "--no-color"],
+                       capture_output=True, text=True, timeout=tmo + 60)
+except subprocess.TimeoutExpired as exc:
+    partial_out = (exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""))
+    partial_err = (exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
+    ids = extract_job_ids(partial_out + "\n" + partial_err)
+    id_note = f"job id {ids[-1]}" if ids else "submitted job (check: higgsfield generate list)"
+    say(f"timed out after {tmo}s while waiting on {id_note} (credits may already be spent; do not blindly resubmit)")
+    sys.exit(5)
+
+gen_s = round(time.time() - t1)
+try:
+    jobs = json.loads(r.stdout); jobs = jobs if isinstance(jobs, list) else [jobs]
+except Exception:
+    jobs = []
+done = [j for j in jobs if isinstance(j, dict) and j.get("status") == "completed" and j.get("result_url")]
+if r.returncode != 0 or not done:
+    tail = (r.stderr or r.stdout or "").strip()[-400:]
+    # Billing safety: if a job id was already created (queued/in_progress/timed out), exit 5 so callers never double-pay.
+    pending_ids = [str(j["id"]) for j in jobs if isinstance(j, dict) and j.get("id") and j.get("status") not in ("failed", "canceled", "cancelled", "rejected")]
+    if not pending_ids and any(k in tail.lower() for k in ("timeout", "timed out", "still running", "in_progress", "queued")):
+        pending_ids = extract_job_ids((r.stdout or "") + "\n" + (r.stderr or ""))
+    if pending_ids:
+        say(f"job id {pending_ids[-1]} still running or timed out (credits spent; check with: higgsfield generate wait {pending_ids[-1]}): {tail}")
+        sys.exit(5)
+    if any(k in tail.lower() for k in ("insufficient", "not enough credits", "402", "quota")):
+        say(f"dry (quota): {tail}"); sys.exit(1)
+    say(f"the video job did not complete (exit {r.returncode}): {tail}"); sys.exit(1)
+j = done[-1]
+
+# From here credits have been spent: any delivery failure exits 5, never re-runs.
+try:
+    out = os.path.abspath(out); os.makedirs(os.path.dirname(out), exist_ok=True)
+    url = j["result_url"]
+    work = tempfile.mkdtemp(prefix="higgsfield-video.")
+    raw = os.path.join(work, "raw.mp4")
+    urllib.request.urlretrieve(url, raw)
+    shutil.copy(raw, out)
+    shutil.rmtree(work, ignore_errors=True)
+    after = balance()
+    spent = (round(float(before) - after, 3) if before is not None and after is not None else None)
+    observed = j.get("job_type") or "?"
+    stem = os.path.splitext(out)[0]
+    rec = [
+        f"prompt: {prompt}",
+        f"painter: Higgsfield video ({plan} plan, official higgsfield CLI, browser sign-in, no API key)",
+        f"  video model requested: {model} | job reports: {observed} ({j.get('display_name', '?')})"
+        + ("" if observed == model else "  <- DIFFERENT from the request"),
+        f"  job id: {j.get('id')} | aspect: {aspect or 'default'} | duration: {duration or 'default'} | resolution: {resolution or 'default'}",
+        f"  first: {first or 'none'} | last: {last or 'none'} | references: {len(refs)}",
+        f"  credits: estimated {est}; balance {before} -> {after}" + (f" (spent {spent})" if spent is not None else ""),
+        f"  timings: generate {gen_s}s, total {round(time.time() - t0)}s",
+        f"  delivered: {out}",
+        f"  result url: {url}",
+    ]
+    with open(f"{stem}.prompt.txt", "w", encoding="utf-8") as f:
+        f.write("\n".join(rec) + "\n")
+except Exception as e:
+    say(f"generated (credits spent) but not delivered: {e}. The job's file: {j.get('result_url')}"); sys.exit(5)
+
+say(f"generated by Higgsfield {observed}; requested={model}; credits~{est}; {round(time.time() - t0)}s")
+print(out)
+PY

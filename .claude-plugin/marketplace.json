@@ -1,0 +1,15 @@
+{
+  "name": "subpowers",
+  "owner": {
+    "name": "Luis Carrillo",
+    "url": "https://github.com/itsluisc"
+  },
+  "plugins": [
+    {
+      "name": "subpowers",
+      "source": "./",
+      "description": "Images, avatars, storyboards, stop-motion, and video on the AI subscriptions you already pay for (ChatGPT, Antigravity, Grok/X Subscription, opt-in Higgsfield). Shared CLI + MCP server across Claude Code, Antigravity, Codex, Cursor, Grok, and Hermes.",
+      "version": "0.5.0"
+    }
+  ]
+}

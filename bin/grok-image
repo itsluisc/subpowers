@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # grok-image: make an image with xAI's Grok Imagine through the Grok CLI
-# (`grok`, Grok Build), paid for by the logged-in grok.com subscription
-# (SuperGrok / SuperGrok Heavy). No API key, no per-image bill.
+# (`grok`, Grok Build), paid for by the logged-in grok.com account
+# (The X Subscription, formerly SuperGrok). No API key, no per-image bill.
 # A subpowers painter (https://github.com/itsluisc/subpowers), same contract as
 # bin/chatgpt-image and bin/antigravity-image.
 #

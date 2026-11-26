@@ -1,0 +1,29 @@
+{
+  "name": "subpowers",
+  "displayName": "Subpowers",
+  "version": "0.5.0",
+  "description": "Give every coding agent image, avatar, storyboard, stop-motion, and video powers using the AI subscriptions you already pay for (ChatGPT, Google Antigravity, Grok via The X Subscription, and opt-in Higgsfield). Zero API keys.",
+  "author": {
+    "name": "Luis Carrillo",
+    "url": "https://github.com/itsluisc"
+  },
+  "homepage": "https://github.com/itsluisc/subpowers",
+  "repository": "https://github.com/itsluisc/subpowers",
+  "license": "MIT",
+  "keywords": [
+    "image-generation",
+    "video-generation",
+    "mcp",
+    "claude-code-plugin",
+    "antigravity-plugin",
+    "chatgpt",
+    "antigravity",
+    "grok",
+    "higgsfield",
+    "soul-id",
+    "avatar",
+    "storyboard",
+    "hyperframes",
+    "no-api-key"
+  ]
+}

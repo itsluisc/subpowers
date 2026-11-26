@@ -1,0 +1,36 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "subpowers",
+  "displayName": "Subpowers",
+  "version": "0.5.0",
+  "description": "Generate images, 3-to-4-painter councils, dark neutral gray (#3A3A3C) avatar character sheets, storyboards, stop-motion, and short video using the AI subscriptions you already pay for (ChatGPT, Antigravity, Grok / The X Subscription, and opt-in Higgsfield). No API keys.",
+  "logo": "assets/icon.svg",
+  "suggestedPrompts": [
+    "Check which AI subscriptions and painters are connected right now",
+    "Paint 3 options side-by-side in council mode from this photo of my room",
+    "Build a flat dark neutral gray (#3A3A3C) character turnaround sheet from my reference photos",
+    "Animate this hero image into a 6-second 9:16 clip with sound"
+  ],
+  "category": ["Design, Creative & Media", "Developer Tools"],
+  "author": {
+    "name": "Luis Carrillo",
+    "url": "https://github.com/itsluisc"
+  },
+  "homepage": "https://github.com/itsluisc/subpowers",
+  "repository": "https://github.com/itsluisc/subpowers",
+  "license": "MIT",
+  "keywords": [
+    "subpowers",
+    "image-generation",
+    "video-generation",
+    "council",
+    "avatar",
+    "character-sheet",
+    "chatgpt",
+    "grok",
+    "higgsfield",
+    "soul-id",
+    "hyperframes",
+    "mcp"
+  ]
+}

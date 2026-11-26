@@ -160,7 +160,7 @@ if found:
   fi
 fi
 
-echo "Grok painter (xAI Grok Imagine, your SuperGrok plan)"
+echo "Grok painter (xAI Grok Imagine, The X Subscription / formerly SuperGrok)"
 if ! command -v grok >/dev/null 2>&1; then
   off "Grok CLI not installed -> curl -fsSL https://x.ai/cli/install.sh | bash   then grok login"
 else
@@ -169,24 +169,25 @@ else
   if grep -qi "logged in with grok.com" <<<"$gm"; then
     gdrv="$(printf '%s\n' "$gm" | sed -nE 's/^[[:space:]]*[-*][[:space:]]+([A-Za-z0-9._-]+).*/\1/p' | grep -vi fast | head -n 1)"
     pass "logged in with grok.com (helper model: ${gdrv:-grok default}; API-key auth is switched off for every call)"
-    info "painter = xAI's Grok Imagine; images ask for ${GROK_IMAGE_MODEL-grok-imagine-image-2.0}, video for grok-imagine-video-1.5 (set by the grok CLI)"
+    info "painter = xAI's Grok Imagine; images ask for ${GROK_IMAGE_MODEL-grok-imagine-image-2.0}, video for grok-imagine-video-1.5 (The X Subscription shared pool)"
     ready+=(grok)
   else
     fail "grok is installed but not logged in with grok.com -> grok login"
   fi
 fi
 
-# Higgsfield: opt-in. It spends plan credits per image, so auto and council never use it.
-echo "Higgsfield painter (opt-in: --painter higgsfield, spends your Higgsfield plan credits)"
+# Higgsfield: opt-in. CLI spends plan credits (unlimited use_unlim is gated by Higgsfield to web / Claude chat / Claude Cowork / ChatGPT).
+echo "Higgsfield painter (opt-in: --painter higgsfield or --soul-id, spends plan credits)"
 if ! command -v higgsfield >/dev/null 2>&1; then
-  info "higgsfield CLI not installed (optional) -> brew install higgsfield   then higgsfield auth login"
+  info "higgsfield CLI not installed (optional) -> install higgsfield CLI   then higgsfield auth login"
 else
   pass "higgsfield: $(higgsfield --version 2>/dev/null | head -n 1 | awk '{print $2}') at $(command -v higgsfield)"
   hst="$(perl -e 'alarm shift; exec @ARGV' 30 higgsfield account status --json 2>/dev/null || true)"
   hcred="$(python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("credits",""), d.get("subscription_plan_type",""))' <<<"$hst" 2>/dev/null || true)"
   if [[ -n "$hcred" ]]; then
     pass "signed in (${hcred#* } plan, ${hcred%% *} credits; browser sign-in, no API key)"
-    info "model = ${HIGGSFIELD_IMAGE_MODEL:-nano_banana_2_1} (job id named on every call); each image is priced first and capped at ${HIGGSFIELD_IMAGE_MAX_CREDITS:-2} credits"
+    info "image = ${HIGGSFIELD_IMAGE_MODEL:-nano_banana_2_1} (cap ${HIGGSFIELD_IMAGE_MAX_CREDITS:-2} cr) | Soul 2.0 ~0.12 cr | video = ${HIGGSFIELD_VIDEO_MODEL:-seedance_2_5} (cap ${HIGGSFIELD_VIDEO_MAX_CREDITS:-40} cr)"
+    info "note: Higgsfield gates free-unlimited (use_unlim) to web / Claude chat / Claude Cowork / ChatGPT; CLI calls always price first"
   else
     info "higgsfield is installed but not signed in -> higgsfield auth login (optional painter)"
   fi
@@ -232,6 +233,11 @@ echo "Where agents find it"
 for d in "$HOME/.claude/skills/subpowers" "$HOME/.agents/skills/subpowers" "$HOME/.codex/skills/subpowers"; do
   if [[ -f "$d/SKILL.md" ]]; then pass "$d"; else warn "not linked at $d (bash install.sh links it)"; fi
 done
+for opt_d in "$HOME/.gemini/config/skills/subpowers" "$HOME/.cursor/skills/subpowers" "$HOME/.grok/skills/subpowers" "$HOME/.hermes/skills/subpowers"; do
+  if [[ -f "$opt_d/SKILL.md" ]]; then pass "$opt_d"; fi
+done
+if [[ -x "$here/subpowers-mcp" ]]; then pass "MCP server: $here/subpowers-mcp (Claude Code .mcp.json + Antigravity mcp_config.json)"
+else warn "MCP server missing at $here/subpowers-mcp"; fi
 if [[ -f "$HOME/.claude/skills/subpowers-hyperframes/SKILL.md" ]]; then pass "HyperFrames app chat skill: $HOME/.claude/skills/subpowers-hyperframes"
 else info "HyperFrames app chat skill not linked (optional) -> ln -s $skill/hyperframes/subpowers-hyperframes $HOME/.claude/skills/subpowers-hyperframes"; fi
 if command -v subpowers >/dev/null 2>&1; then pass "subpowers command on PATH"

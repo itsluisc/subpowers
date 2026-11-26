@@ -1,29 +1,33 @@
 #!/usr/bin/env bash
-# install.sh: give every agent on this machine the subpowers skill.
+# install.sh: give every agent on this machine the subpowers skill, CLI, and MCP server.
 #
 #   bash install.sh                  install for this user ($HOME)
+#   bash install.sh --link           symlink ~/.claude/skills/subpowers to this checkout (no copy drift)
 #   bash install.sh --dest DIR       install under DIR instead of $HOME (dry run for testing)
 #   bash install.sh --no-doctor      skip the health check at the end
 #
 # What it does:
 #   1. puts the skill at ~/.claude/skills/subpowers (Claude Code reads it there).
-#      Cloned there already? It stays a git checkout, so `subpowers update` works.
-#   2. links it into ~/.agents/skills and ~/.codex/skills (Codex, Cursor, Gemini CLI, others)
-#   3. puts `subpowers` and the painters (`chatgpt-image`, `antigravity-image`, `grok-image`) on PATH via ~/.local/bin
+#      Cloned there already (or with --link)? It stays linked to your git checkout.
+#   2. links it into ~/.agents/skills and ~/.codex/skills, plus ~/.gemini/config/skills,
+#      ~/.cursor/skills, ~/.grok/skills, and ~/.hermes/skills when those harnesses exist
+#   3. links `subpowers`, `subpowers-mcp`, and all painters into ~/.local/bin
 #   4. installs the codex CLI if it is missing and npm or Homebrew is available
 #   5. runs `subpowers doctor`
 #
 # Safe to re-run. Anything it replaces is moved to ~/.claude/backups/, never deleted.
-# It never logs you in: run `codex login` (ChatGPT), `agy` (Antigravity) and/or `grok login` (Grok) yourself.
+# It never logs you in: run `codex login` (ChatGPT), `agy` (Antigravity), `grok login` (X Subscription),
+# and/or `higgsfield auth login` (opt-in Higgsfield) yourself.
 set -euo pipefail
 
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-root="$HOME"; doctor=1
+root="$HOME"; doctor=1; link_mode=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --dest) [[ $# -ge 2 ]] || { echo "usage: bash install.sh [--dest DIR] [--no-doctor]" >&2; exit 2; }; root="$2"; shift 2 ;;
+    --dest) [[ $# -ge 2 ]] || { echo "usage: bash install.sh [--link] [--dest DIR] [--no-doctor]" >&2; exit 2; }; root="$2"; shift 2 ;;
+    --link) link_mode=1; shift ;;
     --no-doctor) doctor=""; shift ;;
-    *) echo "usage: bash install.sh [--dest DIR] [--no-doctor]" >&2; exit 2 ;;
+    *) echo "usage: bash install.sh [--link] [--dest DIR] [--no-doctor]" >&2; exit 2 ;;
   esac
 done
 mkdir -p "$root"; root="$(cd "$root" && pwd -P)"
@@ -42,14 +46,21 @@ echo "subpowers install -> $root"
 
 # 1. the skill itself
 mkdir -p "$(dirname "$target")"
-if [[ "$here" != "$(cd "$(dirname "$target")" && pwd -P)/subpowers" ]]; then
+if [[ "$here" == "$(cd "$(dirname "$target")" && pwd -P)/subpowers" ]]; then
+  echo "  running from $target (git checkout: $([[ -d "$target/.git" ]] && echo yes || echo no))"
+elif [[ -n "$link_mode" ]]; then
+  if [[ -L "$target" ]]; then ln -sfn "$here" "$target"
+  else
+    if [[ -e "$target" ]]; then stash "$target" "skill"; fi
+    ln -s "$here" "$target"
+  fi
+  echo "  linked skill $target -> $here"
+else
   if [[ -e "$target" || -L "$target" ]]; then stash "$target" "skill"; fi
   mkdir -p "$target"
   (cd "$here" && tar --exclude='.git' --exclude='__pycache__' --exclude='*.bak-*' --exclude='.DS_Store' -cf - .) \
     | (cd "$target" && tar -xf -)
   echo "  copied skill -> $target"
-else
-  echo "  running from $target (git checkout: $([[ -d "$target/.git" ]] && echo yes || echo no))"
 fi
 chmod +x "$target"/bin/* "$target"/install.sh 2>/dev/null || true
 # In a git checkout, ignore permission bits so this chmod never reads as a local edit
@@ -69,13 +80,22 @@ link_into() {  # link_into <skills-dir>
 }
 link_into "$root/.agents/skills"
 link_into "$root/.codex/skills"
-
-# 3. terminal commands
-mkdir -p "$root/.local/bin"
-for c in subpowers chatgpt-image antigravity-image grok-image; do
-  ln -sfn "$target/bin/$c" "$root/.local/bin/$c"
+for harness_dir in "$root/.gemini/config" "$root/.cursor" "$root/.grok" "$root/.hermes"; do
+  if [[ -d "$harness_dir" ]]; then link_into "$harness_dir/skills"; fi
 done
-echo "  linked subpowers, chatgpt-image, antigravity-image, grok-image into $root/.local/bin"
+if [[ -d "$root/.cursor" && -f "$target/rules/subpowers.mdc" ]]; then
+  mkdir -p "$root/.cursor/rules"
+  ln -sfn "$target/rules/subpowers.mdc" "$root/.cursor/rules/subpowers.mdc"
+  echo "  linked $root/.cursor/rules/subpowers.mdc"
+fi
+
+# 3. terminal commands and shared stdio MCP server
+mkdir -p "$root/.local/bin"
+bins=(subpowers subpowers-mcp chatgpt-image antigravity-image grok-image grok-video higgsfield-image higgsfield-video higgsfield-soul)
+for c in "${bins[@]}"; do
+  [[ -e "$target/bin/$c" ]] && ln -sfn "$target/bin/$c" "$root/.local/bin/$c"
+done
+echo "  linked ${bins[*]} into $root/.local/bin"
 case ":$PATH:" in *":$root/.local/bin:"*) ;; *)
   if [[ "$root" == "$HOME" ]]; then echo "  NOTE: add ~/.local/bin to your PATH to type subpowers anywhere (agents do not need this)"; fi ;;
 esac
@@ -97,8 +117,9 @@ elif [[ -n "$doctor" ]]; then
   if ! bash "$target/bin/doctor"; then
     echo
     echo "Installed. Next: log in to at least one subscription, then run: subpowers doctor"
-    echo "  ChatGPT:     codex login   (choose Sign in with ChatGPT)"
-    echo "  Antigravity: agy           (sign in once, then quit)"
-    echo "  Grok:        grok login    (SuperGrok plan)"
+    echo "  ChatGPT:     codex login            (choose Sign in with ChatGPT)"
+    echo "  Antigravity: agy                    (sign in once, then quit)"
+    echo "  Grok:        grok login             (The X Subscription, formerly SuperGrok)"
+    echo "  Higgsfield:  higgsfield auth login  (optional, spends plan credits)"
   fi
 fi
