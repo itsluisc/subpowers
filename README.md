@@ -195,7 +195,7 @@ Your own picks go in `~/.subpowers/config`, one `KEY=value` per line; anything y
 CHATGPT_IMAGE_DRIVERS=gpt-6-sol     # ChatGPT helper model chain, first one tried first
 CHATGPT_IMAGE_EFFORT=high           # low | medium | high | xhigh
 AGY_IMAGE_EFFORT=high               # low | medium | high
-GROK_IMAGE_MODEL=                   # empty = xAI's default Imagine model instead of the quality one
+GROK_IMAGE_MODEL=                   # empty = xAI's default Imagine model instead of grok-imagine-image-2.0
 ```
 
 </details>
@@ -203,25 +203,30 @@ GROK_IMAGE_MODEL=                   # empty = xAI's default Imagine model instea
 <details>
 <summary>Use it in Cursor, Gemini CLI, or any agent's rules</summary>
 
-- **Claude Code**: automatic via `~/.claude/skills/subpowers`, OR install as a native plugin (`/plugin marketplace add itsluisc/subpowers`, `/plugin install subpowers@subpowers`) which loads `.mcp.json`, slash commands (`/paint`, `/council`, `/avatar`, `/video`, `/doctor`), and `skills/subpowers/SKILL.md` (macOS/Linux symlink).
+- **Claude Code**: automatic via `~/.claude/skills/subpowers`, OR install as a native plugin (`/plugin marketplace add itsluisc/subpowers`, `/plugin install subpowers@subpowers`) which loads `.mcp.json`, slash commands (`/paint`, `/council`, `/avatar`, `/video`, `/powers-check`), and `skills/subpowers/SKILL.md`.
 - **Antigravity**: loads `plugin.json`, `mcp_config.json`, `rules/subpowers.mdc`, and `~/.gemini/config/skills/subpowers`.
-- **Codex**: automatic skill via `~/.codex/skills` + `~/.agents/skills`. To add the shared MCP server to `~/.codex/config.toml`:
+- **Codex**: automatic skill via `~/.codex/skills` + `~/.agents/skills`. To add the shared MCP server to `~/.codex/config.toml` (set `tool_timeout_sec` high enough for multi-minute paints and videos):
 ```toml
 [mcp_servers.subpowers]
 command = "python3"
 args = ["/Users/<you>/.local/bin/subpowers-mcp"]
+tool_timeout_sec = 900
 ```
 - **Cursor**: skill linked at `~/.cursor/skills/subpowers` and rule at `~/.cursor/rules/subpowers.mdc`. To add MCP to `~/.cursor/mcp.json`:
 ```json
 { "mcpServers": { "subpowers": { "command": "python3", "args": ["/Users/<you>/.local/bin/subpowers-mcp"] } } }
 ```
-- **Grok CLI, Hermes, GrokBot, and custom agents**: `install.sh` links `~/.grok/skills/subpowers` and `~/.hermes/skills/subpowers` when present, and puts `subpowers` + `subpowers-mcp` on `~/.local/bin` so any shell-capable or MCP-capable agent (including GrokBot via shell) can run it. Or paste this block into your `AGENTS.md` / `CLAUDE.md`:
+- **Grok CLI**: natively compatible with Claude Code plugins/marketplaces (`grok --plugin-dir ~/.claude/skills/subpowers` or `/plugins`) AND supports one-line MCP registration:
+```bash
+grok mcp add subpowers -- python3 ~/.local/bin/subpowers-mcp
+```
+- **Hermes, GrokBot, and custom agents**: `install.sh` links `~/.grok/skills/subpowers` and `~/.hermes/skills/subpowers` when present, and puts `subpowers` + `subpowers-mcp` on `~/.local/bin` so any shell-capable or MCP-capable agent (including GrokBot via shell) can run it. Or paste this block into your `AGENTS.md` / `CLAUDE.md`:
 
 ```markdown
 ## Making images
 To make any image, run:
   subpowers image "<detailed prompt>" /absolute/path/out.png [--size 1536x1024] [--ref photo.jpg] [--painter council|chatgpt|google|grok]
-- Uses my own ChatGPT / Google AI / SuperGrok subscription. No API key.
+- Uses my own ChatGPT / Google AI / X Subscription (Grok) plan. No API key.
 - Takes 1 to 2 min: use a 10-minute command timeout.
 - It prints the saved path. Look at the image before saying it is done.
 - Full instructions: ~/.claude/skills/subpowers/SKILL.md
@@ -235,7 +240,7 @@ Update anytime with `subpowers update` (check what you have with `subpowers --ve
 
 1. `git clone https://github.com/itsluisc/subpowers ~/.claude/skills/subpowers` (if it already exists, `git -C ~/.claude/skills/subpowers pull` instead).
 2. `bash ~/.claude/skills/subpowers/install.sh`. It links the skill for other agents, puts `subpowers` on PATH, installs the codex CLI if npm or Homebrew is present, and runs the doctor.
-3. Read the doctor's last lines. If no painter is ready, tell your user to run **one** of these themselves (each opens a browser to sign in, which you must not do for them): `codex login` (ChatGPT), `agy` (Google; install it first with `curl -fsSL https://antigravity.google/cli/install.sh | bash`) or `grok login` (Grok, SuperGrok; install with `curl -fsSL https://x.ai/cli/install.sh | bash`).
+3. Read the doctor's last lines. If no painter is ready, tell your user to run **one** of these themselves (each opens a browser to sign in, which you must not do for them): `codex login` (ChatGPT), `agy` (Google; install it first with `curl -fsSL https://antigravity.google/cli/install.sh | bash`) or `grok login` (Grok, The X Subscription; install with `curl -fsSL https://x.ai/cli/install.sh | bash`).
 4. After they log in, run `subpowers doctor --smoke` and show them the test image.
 5. From then on, read `~/.claude/skills/subpowers/SKILL.md` before making images.
 

@@ -20,7 +20,12 @@
 #
 # Exit: 0 delivered, 1 failed before billing, 2 usage, 3 not connected, 5 submitted/paid but not delivered.
 set -euo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  d="$(cd "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$d/$src"
+done
+here="$(cd "$(dirname "$src")" && pwd)"
 cfg="${SUBPOWERS_HOME:-$HOME/.subpowers}/config"
 if [[ -f "$cfg" ]]; then
   while IFS='=' read -r k v || [[ -n "$k" ]]; do
@@ -31,7 +36,7 @@ if [[ -f "$cfg" ]]; then
 fi
 export SUBPOWERS_BIN="$here"
 exec python3 - "$@" <<'PY'
-import json, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
+import json, math, os, re, shutil, subprocess, sys, tempfile, time, urllib.request
 
 me = "higgsfield-video"
 def say(*a): print(f"{me}:", *a, file=sys.stderr)
@@ -129,37 +134,54 @@ if "mode" in params:
     elif not has_media and "t2v" in mode_enum:
         job += ["--mode", "t2v"]
 
-if aspect and "aspect_ratio" in params:
+if aspect:
+    if "aspect_ratio" not in params:
+        say(f"model '{model}' does not accept --aspect"); sys.exit(2)
     enum = params["aspect_ratio"].get("enum") or []
     if enum and aspect not in enum:
         say(f"--aspect must be one of {' '.join(enum)} for {model}"); sys.exit(2)
     job += ["--aspect_ratio", aspect]
-if duration and "duration" in params:
+if duration:
+    if "duration" not in params:
+        say(f"model '{model}' does not accept --duration"); sys.exit(2)
     job += ["--duration", str(duration)]
-if resolution and "resolution" in params:
+if resolution:
+    if "resolution" not in params:
+        say(f"model '{model}' does not accept --resolution"); sys.exit(2)
     enum = params["resolution"].get("enum") or []
     if enum and resolution not in enum:
         say(f"--resolution must be one of {' '.join(enum)} for {model}"); sys.exit(2)
     job += ["--resolution", resolution]
-if no_audio and "generate_audio" in params:
+if no_audio:
+    if "generate_audio" not in params:
+        say(f"model '{model}' does not accept --no-audio"); sys.exit(2)
     job += ["--generate_audio", "false"]
 
 if first:
     if "start_image" in params: job += ["--start-image", os.path.abspath(first)]
-    else: job += ["--image-references", os.path.abspath(first)]
-if last and "end_image" in params:
+    elif "image_references" in params: job += ["--image-references", os.path.abspath(first)]
+    else: say(f"model '{model}' does not accept --first image input"); sys.exit(2)
+if last:
+    if "end_image" not in params:
+        say(f"model '{model}' does not accept --last frame input"); sys.exit(2)
     job += ["--end-image", os.path.abspath(last)]
 for r in refs:
     ext = os.path.splitext(r)[1].lower()
     if ext in (".mp4", ".mov", ".webm") and "video_references" in params:
         job += ["--video-references", os.path.abspath(r)]
-    else:
+    elif "image_references" in params:
         job += ["--image-references", os.path.abspath(r)]
+    else:
+        say(f"model '{model}' does not accept --ref media input"); sys.exit(2)
 
 try:
     est = float(cli("generate", "cost", model, *job, timeout=120).get("credits"))
 except Exception as e:
     say(f"could not price the video job ({e})"); sys.exit(1)
+if not math.isfinite(cap) or cap < 0:
+    say(f"invalid HIGGSFIELD_VIDEO_MAX_CREDITS={cap}"); sys.exit(2)
+if not math.isfinite(est) or est < 0:
+    say(f"invalid credit quote from Higgsfield ({est}); refusing to spend"); sys.exit(1)
 if est > cap:
     say(f"{model} would cost {est} credits, over the cap of {cap} (HIGGSFIELD_VIDEO_MAX_CREDITS). Nothing was spent."); sys.exit(1)
 if before is not None and float(before) < est:

@@ -8,7 +8,12 @@
 #   higgsfield-soul resolve <name-or-uuid>             # prints only the UUID (for scripts)
 #   higgsfield-soul create <name> IMG1 IMG2 IMG3 IMG4 IMG5 [IMG6..20] [--cinematic] [--wait]
 set -euo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  d="$(cd "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$d/$src"
+done
+here="$(cd "$(dirname "$src")" && pwd)"
 export SUBPOWERS_BIN="$here"
 exec python3 - "$@" <<'PY'
 import json, os, shutil, subprocess, sys, tempfile

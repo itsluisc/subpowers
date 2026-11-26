@@ -7,6 +7,7 @@ and Content-Length framed messages automatically.
 """
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -22,6 +23,7 @@ SERVER_INFO = {
 }
 
 SUPPORTED_PROTOCOLS = {"2024-11-05", "2025-03-26", "2025-06-18"}
+REF_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 TOOLS = [
     {
@@ -73,7 +75,7 @@ TOOLS = [
                     "description": "When painter='council', also include Higgsfield as a 4th option (spends Higgsfield plan credits).",
                 },
                 "size": {"type": "string", "description": "Target pixel size like 1536x1024, 1080x1920, or 1024x1024."},
-                "model": {"type": "string", "description": "Higgsfield-only model override (e.g. text2image_soul_v2, gpt_image_2_6, nano_banana_2_1)."},
+                "model": {"type": "string", "description": "Higgsfield-only model override (e.g. nano_banana_2_1, gpt_image_2_6, text2image_soul_v2)."},
                 "soul_id": {"type": "string", "description": "Higgsfield Soul 2.0 character name or UUID (auto-uses text2image_soul_v2 unless model is set)."},
                 "style_id": {"type": "string", "description": "Optional Higgsfield Soul style UUID."},
                 "refs": {"type": "string", "description": "Saved reference set name (from subpowers_refs)."},
@@ -134,7 +136,7 @@ TOOLS = [
         "name": "subpowers_video",
         "description": (
             "Generate a short video clip with sound using Grok Imagine 1.5 (default, included in The X Subscription) "
-            "or Higgsfield Video (opt-in, e.g. seedance_2_5, kling4_0, veo3_1, priced first and capped)."
+            "or Higgsfield Video (opt-in, painter='higgsfield', e.g. seedance_2_5, kling4_0, veo3_1, priced first and capped)."
         ),
         "inputSchema": {
             "type": "object",
@@ -147,7 +149,7 @@ TOOLS = [
                     "default": "grok",
                     "description": "grok (default, X Subscription) or higgsfield (opt-in, spends Higgsfield plan credits).",
                 },
-                "model": {"type": "string", "description": "Higgsfield-only video model (default seedance_2_5; e.g. kling4_0, veo3_1, grok_video_v15)."},
+                "model": {"type": "string", "description": "Higgsfield-only video model (requires painter='higgsfield'; default seedance_2_5)."},
                 "first_frame": {"type": "string", "description": "Absolute path to pinned first frame image."},
                 "last_frame": {"type": "string", "description": "Absolute path to pinned last frame image."},
                 "refs": {"type": "string", "description": "Saved reference set name."},
@@ -155,7 +157,7 @@ TOOLS = [
                 "voice": {"type": "string", "description": "Grok-only preset voice (e.g. ara, eve, leo, rex)."},
                 "duration": {"type": "integer", "description": "Clip duration in seconds (1-15 for Grok; model-dependent for Higgsfield)."},
                 "aspect": {"type": "string", "default": "16:9", "description": "Aspect ratio like 16:9, 9:16, 1:1."},
-                "resolution": {"type": "string", "description": "Resolution like 720p or 1080p (Grok supports 480p|720p)."},
+                "resolution": {"type": "string", "description": "Resolution: 480p or 720p for Grok; model-dependent (e.g. 720p, 1080p) for Higgsfield."},
                 "into_project": {"type": "string", "description": "Optional HyperFrames project folder to mount the clip into."},
                 "at": {"type": "number", "description": "Start time in seconds when using into_project."},
                 "place": {"type": "string", "description": "Placement when using into_project: lower, full, or box:x,y,w,h."},
@@ -173,7 +175,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["list", "add", "path"], "default": "list"},
-                "name": {"type": "string", "description": "Reference set name (required for add/path, optional filter for list)."},
+                "name": {"type": "string", "description": "Reference set name (letters, numbers, ., _, - only)."},
                 "files": {"type": "array", "items": {"type": "string"}, "description": "Local image paths to add (required when action='add')."},
             },
             "required": ["action"],
@@ -213,11 +215,43 @@ def expect_str_list(args, key):
     return val
 
 
+def expect_bool(args, key, default=False):
+    val = args.get(key, default)
+    if val is None:
+        return default
+    if not isinstance(val, bool):
+        raise ValueError(f"'{key}' must be a JSON boolean (true or false)")
+    return val
+
+
+def validate_output_path(path_val):
+    if not isinstance(path_val, str) or not path_val.strip():
+        raise ValueError("'output_path' must be a non-empty string")
+    if path_val.startswith("-") or not os.path.isabs(path_val):
+        raise ValueError("'output_path' must be an absolute path (e.g. /abs/path/out.png)")
+    return path_val
+
+
+def validate_ref_name(name_val):
+    if not isinstance(name_val, str) or name_val in (".", "..") or not REF_NAME_RE.match(name_val):
+        raise ValueError("invalid reference set name (use only letters, numbers, '.', '_', '-')")
+    return name_val
+
+
+def env_int(key, default):
+    try:
+        v = int(os.environ.get(key, ""))
+        return v if v > 0 else default
+    except Exception:
+        return default
+
+
 def run_cmd(cmd, timeout=900):
     env = os.environ.copy()
     env["SUBPOWERS_NO_AUTOUPDATE"] = env.get("SUBPOWERS_NO_AUTOUPDATE", "1")
     proc = subprocess.Popen(
         cmd,
+        stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
@@ -228,7 +262,6 @@ def run_cmd(cmd, timeout=900):
         out, err = proc.communicate(timeout=timeout)
         return proc.returncode, (out or "").strip(), (err or "").strip()
     except subprocess.TimeoutExpired:
-        # Kill the entire process group so background council/Higgsfield painters do not keep running.
         try:
             os.killpg(proc.pid, signal.SIGTERM)
             try:
@@ -238,7 +271,7 @@ def run_cmd(cmd, timeout=900):
                 proc.communicate(timeout=3)
         except Exception:
             proc.kill()
-        return 124, "", f"command timed out after {timeout}s (process group terminated)"
+        return 124, "", f"local subprocess timed out after {timeout}s (remote provider job may still be running)"
     except Exception as exc:
         try:
             os.killpg(proc.pid, signal.SIGKILL)
@@ -278,23 +311,22 @@ def handle_tool(name, args):
         action = args.get("action", "list")
         cmd = ["bash", SUBPOWERS, "refs", str(action)]
         if action in ("add", "path"):
-            if not args.get("name"):
-                return False, {"error": f"refs {action} requires 'name'"}
-            cmd.append(str(args["name"]))
+            rname = validate_ref_name(args.get("name"))
+            cmd.append(rname)
             if action == "add":
                 files = expect_str_list(args, "files")
                 if not files:
                     return False, {"error": "refs add requires non-empty 'files' array"}
                 cmd.extend(files)
-        elif args.get("name"):
-            cmd.append(str(args["name"]))
+        elif args.get("name") is not None:
+            cmd.append(validate_ref_name(args["name"]))
         rc, out, err = run_cmd(cmd, timeout=60)
         return rc == 0, {"ok": rc == 0, "items": [l for l in out.splitlines() if l], "stderr": err}
 
     if name == "subpowers_soul":
         action = args.get("action", "list")
         if action == "list":
-            rc, out, err = run_cmd(["bash", HF_SOUL, "list", "--json"], timeout=45)
+            rc, out, err = run_cmd(["bash", HF_SOUL, "list", "--json"], timeout=60)
             data = out
             try:
                 data = json.loads(out)
@@ -305,7 +337,7 @@ def handle_tool(name, args):
             target = args.get("soul_id") or args.get("name")
             if not target:
                 return False, {"error": "soul get requires 'soul_id' or 'name'"}
-            rc, out, err = run_cmd(["bash", HF_SOUL, "get", str(target), "--json"], timeout=45)
+            rc, out, err = run_cmd(["bash", HF_SOUL, "get", str(target), "--json"], timeout=60)
             data = out
             try:
                 data = json.loads(out)
@@ -315,14 +347,16 @@ def handle_tool(name, args):
         if action == "create":
             cname = args.get("name")
             imgs = expect_str_list(args, "images")
-            if not cname or len(imgs) < 5:
+            cinematic = expect_bool(args, "cinematic", False)
+            wait = expect_bool(args, "wait", False)
+            if not cname or not isinstance(cname, str) or len(imgs) < 5:
                 return False, {"error": "soul create requires 'name' and 5 to 20 image paths"}
-            cmd = ["bash", HF_SOUL, "create", str(cname), *imgs]
-            if args.get("cinematic"):
+            cmd = ["bash", HF_SOUL, "create", cname, *imgs]
+            if cinematic:
                 cmd.append("--cinematic")
-            if args.get("wait"):
+            if wait:
                 cmd.append("--wait")
-            rc, out, err = run_cmd(cmd, timeout=900 if args.get("wait") else 120)
+            rc, out, err = run_cmd(cmd, timeout=1500 if wait else 240)
             return rc == 0, {"ok": rc == 0, "output": out, "stderr": err}
         return False, {"error": f"unknown soul action: {action}"}
 
@@ -334,20 +368,29 @@ def handle_tool(name, args):
         into = args.get("into_project")
         if not out_path and not into:
             return False, {"error": "provide 'output_path' or 'into_project'"}
+        if out_path is not None:
+            out_path = validate_output_path(out_path)
         ref_paths = expect_str_list(args, "ref_paths")
+        with_hf = expect_bool(args, "with_higgsfield", False)
+        snapshot = expect_bool(args, "snapshot", False)
         painter = args.get("painter")
         hf_only_used = any(args.get(k) for k in ("model", "soul_id", "style_id"))
         if hf_only_used:
             if not painter or painter == "auto":
                 painter = "higgsfield"
-            elif painter not in ("higgsfield", "council"):
+            elif painter == "council":
+                if not with_hf:
+                    return False, {"error": "model, soul_id, and style_id require with_higgsfield=true when painter='council'"}
+            elif painter != "higgsfield":
                 return False, {"error": "model, soul_id, and style_id require painter='higgsfield' or painter='council' with with_higgsfield=true"}
+        if args.get("refs") is not None:
+            validate_ref_name(args["refs"])
         cmd = ["bash", SUBPOWERS, "image", prompt]
         if out_path:
-            cmd.append(str(out_path))
+            cmd.append(out_path)
         if painter:
             cmd.extend(["--painter", str(painter)])
-        if args.get("with_higgsfield"):
+        if with_hf:
             cmd.append("--with-higgsfield")
         if args.get("size"):
             cmd.extend(["--size", str(args["size"])])
@@ -373,13 +416,19 @@ def handle_tool(name, args):
                 cmd.extend(["--layer-name", str(args["layer_name"])])
             if args.get("place"):
                 cmd.extend(["--place", str(args["place"])])
-            if args.get("snapshot"):
+            if snapshot:
                 cmd.append("--snapshot")
-        rc, out, err = run_cmd(cmd, timeout=900)
+        uses_hf = (painter == "higgsfield") or with_hf
+        tmo = (env_int("HIGGSFIELD_IMAGE_TIMEOUT", 600) + 300) if uses_hf else 900
+        rc, out, err = run_cmd(cmd, timeout=tmo)
+        if rc == 124 and uses_hf:
+            rc = 5
+            err = (err + "; " if err else "") + "Higgsfield credits may already be spent; check `higgsfield generate list` before retrying"
         lines = [l for l in out.splitlines() if l.strip()]
         sheet = next((l for l in lines if l.endswith("-all.jpg")), None)
         return rc == 0, {
             "ok": rc == 0,
+            "exit_code": rc,
             "paths": lines,
             "contact_sheet": sheet,
             "receipt": read_receipt_for(lines),
@@ -387,16 +436,17 @@ def handle_tool(name, args):
         }
 
     if name == "subpowers_avatar":
-        out_path = args.get("output_path")
-        if not out_path or not isinstance(out_path, str):
-            return False, {"error": "'output_path' must be a non-empty string"}
+        out_path = validate_output_path(args.get("output_path"))
         refs_name = args.get("refs")
+        if refs_name is not None:
+            refs_name = validate_ref_name(refs_name)
         ref_paths = expect_str_list(args, "ref_paths")
+        with_hf = expect_bool(args, "with_higgsfield", False)
         if not refs_name and not ref_paths:
             return False, {"error": "provide 'refs' (saved reference set) or 'ref_paths' (local photos array)"}
         cmd = ["bash", SUBPOWERS, "avatar"]
         if refs_name:
-            cmd.extend([str(refs_name), out_path])
+            cmd.extend([refs_name, out_path])
         else:
             cmd.extend(["--from", ref_paths[0], out_path])
             for extra in ref_paths[1:]:
@@ -404,17 +454,23 @@ def handle_tool(name, args):
         painter = args.get("painter", "council")
         if painter:
             cmd.extend(["--painter", str(painter)])
-        if args.get("with_higgsfield"):
+        if with_hf:
             cmd.append("--with-higgsfield")
         if args.get("style"):
             cmd.extend(["--style", str(args["style"])])
         if args.get("size"):
             cmd.extend(["--size", str(args["size"])])
-        rc, out, err = run_cmd(cmd, timeout=900)
+        uses_hf = (painter == "higgsfield") or with_hf
+        tmo = (env_int("HIGGSFIELD_IMAGE_TIMEOUT", 600) + 300) if uses_hf else 900
+        rc, out, err = run_cmd(cmd, timeout=tmo)
+        if rc == 124 and uses_hf:
+            rc = 5
+            err = (err + "; " if err else "") + "Higgsfield credits may already be spent; check `higgsfield generate list` before retrying"
         lines = [l for l in out.splitlines() if l.strip()]
         sheet = next((l for l in lines if l.endswith("-all.jpg")), None)
         return rc == 0, {
             "ok": rc == 0,
+            "exit_code": rc,
             "paths": lines,
             "contact_sheet": sheet,
             "background": "#3A3A3C (flat dark neutral gray)",
@@ -430,16 +486,24 @@ def handle_tool(name, args):
         into = args.get("into_project")
         if not out_path and not into:
             return False, {"error": "provide 'output_path' or 'into_project'"}
+        if out_path is not None:
+            out_path = validate_output_path(out_path)
         ref_paths = expect_str_list(args, "ref_paths")
-        painter = args.get("painter") or ("higgsfield" if args.get("model") else "grok")
+        keep_audio = expect_bool(args, "keep_audio", False)
+        snapshot = expect_bool(args, "snapshot", False)
+        painter = args.get("painter") or "grok"
+        if painter not in ("grok", "higgsfield"):
+            return False, {"error": "video 'painter' must be 'grok' or 'higgsfield'"}
         if painter == "higgsfield" and args.get("voice"):
             return False, {"error": "'voice' is Grok-only and not supported with painter='higgsfield'"}
         if painter == "grok" and args.get("model"):
-            return False, {"error": "'model' is Higgsfield-only; pass painter='higgsfield'"}
+            return False, {"error": "'model' is Higgsfield-only; explicitly pass painter='higgsfield' to opt into Higgsfield credits"}
+        if args.get("refs") is not None:
+            validate_ref_name(args["refs"])
         cmd = ["bash", SUBPOWERS, "video", prompt]
         if out_path:
-            cmd.append(str(out_path))
-        cmd.extend(["--painter", str(painter)])
+            cmd.append(out_path)
+        cmd.extend(["--painter", painter])
         if args.get("model"):
             cmd.extend(["--model", str(args["model"])])
         if args.get("first_frame"):
@@ -464,11 +528,18 @@ def handle_tool(name, args):
                 cmd.extend(["--at", str(args["at"])])
             if args.get("place"):
                 cmd.extend(["--place", str(args["place"])])
-            if args.get("keep_audio"):
+            if keep_audio:
                 cmd.append("--keep-audio")
-            if args.get("snapshot"):
+            if snapshot:
                 cmd.append("--snapshot")
-        rc, out, err = run_cmd(cmd, timeout=1200)
+        if painter == "higgsfield":
+            tmo = env_int("SUBPOWERS_MCP_HF_VIDEO_TIMEOUT", env_int("HIGGSFIELD_VIDEO_TIMEOUT", 1200) + 300)
+        else:
+            tmo = env_int("GROK_VIDEO_TIMEOUT", 900) + 180
+        rc, out, err = run_cmd(cmd, timeout=tmo)
+        if rc == 124 and painter == "higgsfield":
+            rc = 5
+            err = (err + "; " if err else "") + "Higgsfield credits may already be spent; check `higgsfield generate list` before retrying"
         lines = [l for l in out.splitlines() if l.strip()]
         return rc == 0, {
             "ok": rc == 0,
@@ -490,8 +561,11 @@ def read_message(stream):
         stripped = line.strip()
         if not stripped:
             continue
-        if stripped.startswith(b"{"):
-            return json.loads(stripped.decode("utf-8")), "jsonl"
+        if stripped.startswith((b"{", b"[")):
+            try:
+                return json.loads(stripped.decode("utf-8")), "jsonl"
+            except Exception as exc:
+                raise ValueError(("jsonl", str(exc)))
         headers = {}
         cur = line
         while cur and cur.strip():
@@ -505,7 +579,10 @@ def read_message(stream):
         body = stream.read(length)
         if not body:
             return None, None
-        return json.loads(body.decode("utf-8")), "framed"
+        try:
+            return json.loads(body.decode("utf-8")), "framed"
+        except Exception as exc:
+            raise ValueError(("framed", str(exc)))
 
 
 def write_message(stream, payload, mode):
@@ -525,19 +602,26 @@ def dispatch(msg):
             "id": None,
             "error": {"code": -32600, "message": "Invalid Request: expected JSON object"},
         }
-    method = msg.get("method")
     req_id = msg.get("id")
-    params = msg.get("params") or {}
+    # Notifications have no id and expect no reply, even on malformed params.
+    if req_id is None and "id" not in msg:
+        return None
+    if msg.get("jsonrpc") != "2.0":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32600, "message": "Invalid Request: jsonrpc must be '2.0'"},
+        }
+    method = msg.get("method")
+    params = msg.get("params") if "params" in msg else {}
+    if params is None:
+        params = {}
     if not isinstance(params, dict):
         return {
             "jsonrpc": "2.0",
             "id": req_id,
             "error": {"code": -32602, "message": "Invalid params: expected JSON object"},
         }
-
-    # Notifications have no id and expect no reply.
-    if req_id is None:
-        return None
 
     if method == "initialize":
         client_ver = params.get("protocolVersion") or "2024-11-05"
@@ -589,6 +673,15 @@ def main():
     while True:
         try:
             msg, mode = read_message(stdin)
+        except ValueError as exc:
+            err_mode, err_msg = exc.args[0] if (exc.args and isinstance(exc.args[0], tuple)) else ("jsonl", str(exc))
+            err_resp = {
+                "jsonrpc": "2.0",
+                "id": None,
+                "error": {"code": -32700, "message": f"Parse error: {err_msg}"},
+            }
+            write_message(stdout, err_resp, err_mode)
+            continue
         except Exception as exc:
             err_resp = {
                 "jsonrpc": "2.0",

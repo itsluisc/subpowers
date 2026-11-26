@@ -9,7 +9,7 @@ Most agents cannot paint. `subpowers` hands visual work to the AI subscriptions 
 
 Works as a CLI (`subpowers ...`), a shared stdio MCP server (`subpowers-mcp`: `subpowers_image`, `subpowers_avatar`, `subpowers_video`, `subpowers_soul`, `subpowers_refs`, `subpowers_powers`, `subpowers_doctor`), a Claude Code plugin (`.claude-plugin/`), and an Antigravity plugin (`plugin.json`).
 
-If `subpowers` is not on PATH, run `bash ~/.claude/skills/subpowers/bin/subpowers ...` (same arguments). Set the command timeout to 600000 ms, or run it in the background.
+If `subpowers` is not on PATH, prefer the `subpowers_*` MCP tools (when installed as a plugin), or run `bash "${CLAUDE_PLUGIN_ROOT:-$HOME/.claude/skills/subpowers}/bin/subpowers" ...` (same arguments). Set the command timeout to 600000 ms, or run it in the background.
 
 ## Context-First Intake (Ground Every Visual in Reality)
 
@@ -52,6 +52,7 @@ subpowers --version   # installed version
 - `auto` and default `council` **never** spend Higgsfield credits. Opt in explicitly with `--painter higgsfield`, `--soul-id`, `--with-higgsfield`, or `SUBPOWERS_COUNCIL_PAINTERS` in `~/.subpowers/config`.
 - Every Higgsfield image or video call prices the job first (`higgsfield generate cost`), refuses above `HIGGSFIELD_IMAGE_MAX_CREDITS` (default `2`) or `HIGGSFIELD_VIDEO_MAX_CREDITS` (default `40`), and logs estimated + actual balance before/after in the receipt.
 - **Unlimited note:** Higgsfield gates free-unlimited (`use_unlim`) server-side to `higgsfield.ai` web, Claude chat, Claude Cowork, and ChatGPT. Calls through the `higgsfield` CLI or third-party MCP hosts spend plan credits transparently (Soul 2.0 `text2image_soul_v2` is only `0.12` credits). Never spoof client headers or claim CLI runs are free.
+- **Multi-ref vs Soul 2.0 on Higgsfield:** When combining multiple real room/environment + portrait `--ref` photos on Higgsfield, use `--model nano_banana_2_1` (or `gpt_image_2_6`), which accepts multiple references together. Reserve `text2image_soul_v2 --soul-id` for zero-ref text staging (or a composition ref that already contains a person), because passing an empty-room `--ref` locks Soul 2.0 onto an empty room.
 
 ## Avatars, Character Sheets & Soul IDs (`#3A3A3C` Neutral Gray Rule)
 
@@ -109,7 +110,8 @@ subpowers hf remove --project PROJECT --layer gen-<slug>
 | `no painter is connected` | `subpowers doctor` lists what to install and log in |
 | `not logged in with ChatGPT` / `live check ... rejected` | `codex logout && codex login` |
 | `agy returned no models` | run `agy` once in a terminal and sign in |
-| `grok is not logged in` / exit 4 | `grok login` with a grok.com account on The X Subscription |
+| `grok is not logged in` (exit 3) | `grok login` with a grok.com account |
+| `SuperGrok feature` / `X Subscription` (exit 4) | that grok.com plan tier lacks Grok Imagine; upgrade on The X Subscription |
 | `unavailable under zero data retention` | run `grok`, type `/privacy`, choose Opt in, or add a video storage bucket |
 | `not signed in to Higgsfield` / `over the cap` | `higgsfield auth login`; or raise `HIGGSFIELD_IMAGE_MAX_CREDITS` / `HIGGSFIELD_VIDEO_MAX_CREDITS` only with user approval |
 | `dry (quota)` | plan quota spent; `auto` moves to the next painter |

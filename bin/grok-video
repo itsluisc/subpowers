@@ -149,8 +149,8 @@ if [[ -z "$saved" || ! -f "$saved" ]]; then
   if [[ $rc -eq 124 || $rc -eq 142 ]]; then echo "$me: timed out after ${tmo}s" >&2
   elif [[ -n "$terr" ]]; then
     echo "$me: reference_to_video failed: $terr" >&2
-    grep -qiE "SuperGrok feature|X Subscription" <<<"$terr" && exit 4
     grep -qi "zero data retention" <<<"$terr" && echo "$me: fix: run grok, type /privacy and choose Opt in, or set up a video storage bucket (https://docs.x.ai/build/settings/zdr-video-storage)" >&2
+    grep -qiE "SuperGrok feature|X Subscription" <<<"$terr" && exit 4
   elif [[ "$(field calls)" == "0" ]]; then echo "$me: grok never called reference_to_video (exit $rc)" >&2
   else echo "$me: no video was saved (exit $rc)" >&2; fi
   echo "(stream log: $log)" >&2; exit 1

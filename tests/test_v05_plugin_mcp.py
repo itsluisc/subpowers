@@ -3,7 +3,7 @@
 - Dual plugin manifests (Claude Code .claude-plugin + .mcp.json + Antigravity plugin.json + mcp_config.json)
 - Shared zero-dependency stdio MCP server (both newline-delimited JSON and Content-Length framing)
 - Higgsfield Soul ID resolution, quality enum guard, Higgsfield video (t2v + omni_reference + cap)
-- 4-painter council (--with-higgsfield) & 18% neutral gray (#3A3A3C) avatar sheet (--from + --style)
+- 4-painter council (--with-higgsfield) & dark neutral gray (#3A3A3C) avatar sheet (--from + --style)
 - install.sh --link multi-harness wiring
 """
 import json
@@ -102,7 +102,11 @@ class SubpowersV05Tests(unittest.TestCase):
             ap = json.load(f)
         self.assertEqual(ap["name"], "subpowers")
         self.assertTrue(os.path.isfile(os.path.join(REPO, ap["logo"])))
-        self.assertTrue(os.path.isfile(os.path.join(REPO, "skills", "subpowers", "SKILL.md")))
+        skill_copy = os.path.join(REPO, "skills", "subpowers", "SKILL.md")
+        self.assertTrue(os.path.isfile(skill_copy))
+        self.assertFalse(os.path.islink(skill_copy), "skills/subpowers/SKILL.md must be a regular file (no symlink warning)")
+        with open(skill_copy, "r", encoding="utf-8") as f1, open(os.path.join(REPO, "SKILL.md"), "r", encoding="utf-8") as f2:
+            self.assertEqual(f1.read(), f2.read(), "skills/subpowers/SKILL.md drifted from SKILL.md")
         self.assertTrue(os.access(os.path.join(BIN, "grok-video"), os.X_OK))
         self.assertTrue(os.access(os.path.join(BIN, "subpowers-mcp"), os.X_OK))
 
@@ -149,11 +153,16 @@ class SubpowersV05Tests(unittest.TestCase):
         body = r2.stdout.split(b"\r\n\r\n", 1)[1]
         self.assertEqual(json.loads(body)["id"], 9)
 
-        # 3) Malformed tool arguments must return isError=True and keep server alive
+        # 3) Malformed tool arguments, string booleans, path traversal, relative output_path, implicit model opt-in
         bad_reqs = "\n".join([
             json.dumps({"jsonrpc": "2.0", "id": 20, "method": "tools/call", "params": {"name": "subpowers_image", "arguments": ["not-an-object"]}}),
             json.dumps({"jsonrpc": "2.0", "id": 21, "method": "tools/call", "params": {"name": "subpowers_image", "arguments": {"prompt": "mug", "output_path": "/tmp/x.png", "ref_paths": "/tmp/not-a-list.png"}}}),
-            json.dumps({"jsonrpc": "2.0", "id": 22, "method": "ping"}),
+            json.dumps({"jsonrpc": "2.0", "id": 22, "method": "tools/call", "params": {"name": "subpowers_image", "arguments": {"prompt": "mug", "output_path": "/tmp/x.png", "with_higgsfield": "false"}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 23, "method": "tools/call", "params": {"name": "subpowers_image", "arguments": {"prompt": "mug", "output_path": "relative.png"}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 24, "method": "tools/call", "params": {"name": "subpowers_refs", "arguments": {"action": "add", "name": "../../outside", "files": ["/tmp/a.png"]}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 25, "method": "tools/call", "params": {"name": "subpowers_video", "arguments": {"prompt": "wave", "output_path": "/tmp/v.mp4", "model": "seedance_2_5"}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 26, "method": "tools/call", "params": {"name": "subpowers_image", "arguments": {"prompt": "mug", "output_path": "/tmp/x.png", "painter": "council", "soul_id": "Demo Creator"}}}),
+            json.dumps({"jsonrpc": "2.0", "id": 27, "method": "ping"}),
         ]) + "\n"
         r3 = subprocess.run(
             ["python3", os.path.join(BIN, "subpowers-mcp")],
@@ -165,10 +174,35 @@ class SubpowersV05Tests(unittest.TestCase):
         )
         self.assertEqual(r3.returncode, 0, r3.stderr)
         res3 = [json.loads(l) for l in r3.stdout.splitlines() if l.strip()]
-        self.assertEqual([m["id"] for m in res3], [20, 21, 22])
-        self.assertTrue(res3[0]["result"]["isError"])
-        self.assertTrue(res3[1]["result"]["isError"])
-        self.assertEqual(res3[2]["result"], {})
+        self.assertEqual([m["id"] for m in res3], [20, 21, 22, 23, 24, 25, 26, 27])
+        for m in res3[:-1]:
+            self.assertTrue(m["result"]["isError"], f"expected isError for id {m['id']}: {m}")
+        self.assertEqual(res3[-1]["result"], {})
+
+        # 4) MCP timeout on Higgsfield video MUST return exit_code=5 + billing warning
+        env_tmo = dict(self.env)
+        env_tmo["SUBPOWERS_MCP_HF_VIDEO_TIMEOUT"] = "1"
+        env_tmo["STUB_HF_SLEEP"] = "3"
+        tmo_req = json.dumps({
+            "jsonrpc": "2.0",
+            "id": 30,
+            "method": "tools/call",
+            "params": {"name": "subpowers_video", "arguments": {"prompt": "slow video", "output_path": os.path.join(self.out, "tmo.mp4"), "painter": "higgsfield"}},
+        }) + "\n"
+        r4 = subprocess.run(
+            ["python3", os.path.join(BIN, "subpowers-mcp")],
+            input=tmo_req,
+            env=env_tmo,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(r4.returncode, 0, r4.stderr)
+        m30 = json.loads(r4.stdout.strip())
+        self.assertTrue(m30["result"]["isError"])
+        p30 = json.loads(m30["result"]["content"][0]["text"])
+        self.assertEqual(p30["exit_code"], 5)
+        self.assertIn("credits may already be spent", p30["stderr"])
 
     def test_higgsfield_soul_id_auto_route_and_quality_enum(self):
         out = os.path.join(self.out, "soul-shot.png")
@@ -236,6 +270,21 @@ class SubpowersV05Tests(unittest.TestCase):
         r6 = self.run_sp("video", "talking clip", vid4, "--painter", "grok", "--model", "seedance_2_5", "--first", first)
         self.assertEqual(r6.returncode, 2)
         self.assertIn("Higgsfield video flags", r6.stderr)
+
+        # Unsupported explicit --last on a video model without end_image MUST fail exit 2 before billing
+        r7 = self.run_sp("video", "clip", vid4, "--painter", "higgsfield", "--model", "kling4_0_no_end", "--last", first)
+        self.assertEqual(r7.returncode, 2)
+        self.assertIn("does not accept --last", r7.stderr)
+
+        # Path traversal in refs MUST fail exit 2
+        r8 = self.run_sp("refs", "add", "../../outside", first)
+        self.assertEqual(r8.returncode, 2)
+        self.assertIn("invalid reference set name", r8.stderr)
+
+        # Council + --soul-id without --with-higgsfield MUST fail exit 2 (no silent drop)
+        r9 = self.run_sp("image", "lamp", os.path.join(self.out, "drop.png"), "--painter", "council", "--soul-id", "Demo Creator")
+        self.assertEqual(r9.returncode, 2)
+        self.assertIn("require --with-higgsfield", r9.stderr)
 
     def test_council_with_higgsfield_and_default_safety(self):
         # Default council must NOT invoke higgsfield

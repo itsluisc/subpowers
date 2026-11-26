@@ -125,7 +125,13 @@ norm_painter() {
 }
 
 # Reference sets: $SUBPOWERS_HOME/refs/NAME/*.{jpg,jpeg,png,webp,heic}. Hidden and ._ files are skipped.
+valid_ref_name() {
+  [[ -n "${1:-}" && "$1" != "." && "$1" != ".." && "$1" =~ ^[A-Za-z0-9._-]+$ ]] || {
+    say "invalid reference set name '${1:-}' (use only letters, numbers, ., _, -)"; return 2
+  }
+}
 ref_files() {
+  valid_ref_name "$1" || return 2
   local dir="$HOME_DIR/refs/$1"
   [[ -d "$dir" ]] || { say "no reference set '$1' (make one: subpowers refs add $1 photo1.jpg photo2.jpg)"; return 3; }
   find "$dir" -maxdepth 1 -type f \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.heic' \) ! -name '.*' | sort
@@ -213,12 +219,15 @@ small_ref() {
   out="$CACHE_DIR/refs-small/$key.jpg"
   if [[ ! -s "$out" ]]; then
     python3 - "$f" "$out" <<'PY' 2>/dev/null || true
-import sys
+import os, sys
 from PIL import Image, ImageOps
-im = ImageOps.exif_transpose(Image.open(sys.argv[1])).convert("RGB")
+src, dst = sys.argv[1], sys.argv[2]
+tmp = f"{dst}.tmp.{os.getpid()}"
+im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
 if max(im.size) > 1280:
     im.thumbnail((1280, 1280))
-im.save(sys.argv[2], "JPEG", quality=88)
+im.save(tmp, "JPEG", quality=88)
+os.replace(tmp, dst)
 PY
   fi
   if [[ -s "$out" ]]; then echo "$out"; else echo "$f"; fi
@@ -311,11 +320,15 @@ $MATCH_SET_TEXT"; shift 2 ;;
       esac
     done
     # Only Higgsfield accepts --soul-id / --style-id / --model: auto-route when painter was not pinned,
-    # or refuse cleanly if a non-Higgsfield single painter was explicitly pinned with those flags.
+    # or refuse cleanly if a non-Higgsfield painter (or council without Higgsfield) was requested.
     if [[ ${#hf_args[@]} -gt 0 ]]; then
       if [[ -z "$painter_explicit" ]]; then
         painter="higgsfield"
-      elif [[ "$painter" != higgsfield && "$painter" != all ]]; then
+      elif [[ "$painter" == all ]]; then
+        if [[ -z "$with_hf" && ",${SUBPOWERS_COUNCIL_PAINTERS:-}," != *higgsfield* && ",${SUBPOWERS_COUNCIL_PAINTERS:-}," != *higgs* ]]; then
+          say "--soul-id, --style-id, and --model require --with-higgsfield when used with --painter council"; exit 2
+        fi
+      elif [[ "$painter" != higgsfield ]]; then
         say "--soul-id, --style-id, and --model are Higgsfield-only flags (use --painter higgsfield or --painter council --with-higgsfield)"; exit 2
       fi
     fi
@@ -618,7 +631,8 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     case "$sub" in
       add)
         [[ $# -ge 2 ]] || { say "usage: subpowers refs add NAME IMG..."; exit 2; }
-        name="$1"; shift; dir="$HOME_DIR/refs/$name"; mkdir -p "$dir"
+        name="$1"; shift; valid_ref_name "$name" || exit 2
+        dir="$HOME_DIR/refs/$name"; mkdir -p "$dir"
         for img in "$@"; do
           [[ -f "$img" ]] || { say "missing: $img"; continue; }
           base="$(basename "$img")"; ext="$(printf '%s' "${base##*.}" | tr '[:upper:]' '[:lower:]')"
@@ -630,7 +644,7 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
       list)
         if [[ $# -ge 1 ]]; then ref_files "$1"; else ls -1 "$HOME_DIR/refs" 2>/dev/null || say "no reference sets yet"; fi
         ;;
-      path) [[ $# -ge 1 ]] || usage; echo "$HOME_DIR/refs/$1" ;;
+      path) [[ $# -ge 1 ]] || usage; valid_ref_name "$1" || exit 2; echo "$HOME_DIR/refs/$1" ;;
       *) say "refs: add | list | path"; exit 2 ;;
     esac
     ;;

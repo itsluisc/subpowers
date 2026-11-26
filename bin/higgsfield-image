@@ -27,7 +27,12 @@
 #
 # Exit: 0 delivered, 1 failed, 2 usage, 3 not connected, 5 painted (credits spent) but not delivered.
 set -euo pipefail
-here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+src="${BASH_SOURCE[0]}"
+while [[ -L "$src" ]]; do
+  d="$(cd "$(dirname "$src")" && pwd)"; src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$d/$src"
+done
+here="$(cd "$(dirname "$src")" && pwd)"
 # Per-user defaults: KEY=value lines in ~/.subpowers/config (only this painter's keys are read).
 cfg="${SUBPOWERS_HOME:-$HOME/.subpowers}/config"
 if [[ -f "$cfg" ]]; then
@@ -171,26 +176,60 @@ if model == "text2image_soul_v2" and len(refs) > 1:
     refs = refs[:1]
 for r in refs: job += ["--image-references", os.path.abspath(r)]
 
+def extract_job_ids(text):
+    ids = []
+    if not text:
+        return ids
+    try:
+        parsed = json.loads(text)
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
+            if isinstance(item, dict) and item.get("id"):
+                ids.append(str(item["id"]))
+    except Exception:
+        pass
+    if not ids:
+        ids = re.findall(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", text)
+    return ids
+
 try:
     est = float(cli("generate", "cost", model, *job, timeout=120).get("credits"))
 except Exception as e:
     say(f"could not price the job ({e})"); sys.exit(1)
+if not math.isfinite(cap) or cap < 0:
+    say(f"invalid HIGGSFIELD_IMAGE_MAX_CREDITS={cap}"); sys.exit(2)
+if not math.isfinite(est) or est < 0:
+    say(f"invalid credit quote from Higgsfield ({est}); refusing to spend"); sys.exit(1)
 if est > cap:
     say(f"{model} would cost {est} credits, over the cap of {cap} (HIGGSFIELD_IMAGE_MAX_CREDITS). Nothing was spent."); sys.exit(1)
 if before is not None and float(before) < est:
     say(f"dry (quota): {before} credits left, the job needs {est}. Try another painter."); sys.exit(1)
 
 t1 = time.time()
-r = subprocess.run([hf, "generate", "create", model, *job, "--wait", "--wait-timeout", f"{tmo}s", "--json", "--no-color"],
-                   capture_output=True, text=True, timeout=tmo + 60)
+try:
+    r = subprocess.run([hf, "generate", "create", model, *job, "--wait", "--wait-timeout", f"{tmo}s", "--json", "--no-color"],
+                       capture_output=True, text=True, timeout=tmo + 60)
+except subprocess.TimeoutExpired as exc:
+    partial_out = (exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or ""))
+    partial_err = (exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or ""))
+    ids = extract_job_ids(partial_out + "\n" + partial_err)
+    id_note = f"job id {ids[-1]}" if ids else "submitted job (check: higgsfield generate list)"
+    say(f"timed out after {tmo}s while waiting on {id_note} (credits may already be spent; do not blindly resubmit)")
+    sys.exit(5)
 paint_s = round(time.time() - t1)
 try:
     jobs = json.loads(r.stdout); jobs = jobs if isinstance(jobs, list) else [jobs]
 except Exception:
     jobs = []
-done = [j for j in jobs if j.get("status") == "completed" and j.get("result_url")]
+done = [j for j in jobs if isinstance(j, dict) and j.get("status") == "completed" and j.get("result_url")]
 if r.returncode != 0 or not done:
     tail = (r.stderr or r.stdout or "").strip()[-400:]
+    pending_ids = [str(j["id"]) for j in jobs if isinstance(j, dict) and j.get("id") and j.get("status") not in ("failed", "canceled", "cancelled", "rejected")]
+    if not pending_ids and any(k in tail.lower() for k in ("timeout", "timed out", "still running", "in_progress", "queued")):
+        pending_ids = extract_job_ids((r.stdout or "") + "\n" + (r.stderr or ""))
+    if pending_ids:
+        say(f"job id {pending_ids[-1]} still running or timed out (credits spent; check with: higgsfield generate wait {pending_ids[-1]}): {tail}")
+        sys.exit(5)
     if any(k in tail.lower() for k in ("insufficient", "not enough credits", "402", "quota")):
         say(f"dry (quota): {tail}"); sys.exit(1)
     say(f"the job did not complete (exit {r.returncode}): {tail}"); sys.exit(1)

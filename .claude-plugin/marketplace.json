@@ -1,5 +1,6 @@
 {
   "name": "subpowers",
+  "description": "Official Subpowers marketplace: image, avatar, storyboard, stop-motion, and video generation powered by the AI subscriptions you already pay for (zero API keys).",
   "owner": {
     "name": "Luis Carrillo",
     "url": "https://github.com/itsluisc"
