@@ -30,7 +30,7 @@ class RemoteTests(unittest.TestCase):
             self.assertEqual(len(status['sha256']),64)
             self.assertTrue((p/'image.home').read_text().startswith('/'))
 
-    def test_runner_honors_stdout_jpeg(self):
+    def test_runner_declines_stdout_jpeg(self):
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp)
             door = p / 'fake-subpowers'
@@ -50,10 +50,9 @@ class RemoteTests(unittest.TestCase):
             r = subprocess.run(['python3', str(runner), str(p)], capture_output=True, timeout=10)
             self.assertEqual(r.returncode, 0, r.stderr)
             status = json.loads((p / 'status.json').read_text())
-            self.assertEqual(status['state'], 'delivered')
-            self.assertTrue(status['output'].endswith('/image.jpg'))
+            self.assertEqual(status['state'], 'failed')
+            self.assertIsNone(status['output'])
             self.assertFalse((p / 'image.png').exists())
-            self.assertEqual(len(status['sha256']), 64)
 
     def test_runner_ignores_path_outside_job(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -78,25 +77,15 @@ class RemoteTests(unittest.TestCase):
             self.assertEqual(status['state'], 'failed')
             self.assertIsNone(status['output'])
 
-    def test_fetch_accepts_real_extension(self):
-        job = 'a' * 32
-        name, ext = MOD['remote_image_path']('/home/u/.subpowers/jobs/%s/image.jpg' % job, job)
-        self.assertEqual((name, ext), ('image.jpg', 'jpg'))
-        dest = MOD['fetch_destination'](Path('/tmp/banana.png'), 'jpg')
-        self.assertEqual(dest.name, 'banana.jpg')
-        same = MOD['fetch_destination'](Path('/tmp/banana.jpg'), 'jpg')
-        self.assertEqual(same.name, 'banana.jpg')
-        self.assertTrue(MOD['image_bytes_match'](b'\xff\xd8\xff' + b'x' * 40, 'jpg'))
-        self.assertFalse(MOD['image_bytes_match'](b'\x89PNG\r\n\x1a\n' + b'x' * 40, 'jpg'))
-        with self.assertRaises(RuntimeError):
-            MOD['remote_image_path']('/tmp/%s/../../etc/image.jpg' % job, job)
-        with self.assertRaises(RuntimeError):
-            MOD['remote_image_path']('/home/u/.subpowers/jobs/%s/image.png' % job, 'b' * 32)
-
-    def test_refuses_wrong_job_root(self):
-        job = 'a' * 32
-        with self.assertRaises(RuntimeError):
-            MOD['remote_image_path']('/tmp/%s/image.jpg' % job, job)
+    def test_fetch_validates_exact_png_job_path(self):
+        job = "a" * 32
+        root = f"/home/test/.subpowers/jobs/{job}"
+        validate = MOD["validate_remote_png"]
+        validate(f"{root}/image.png", job)
+        for path in (f"{root}/image.jpg", f"{root}/../{job}/image.png",
+                     f"/tmp/{job}/image.png", root.replace(job, "b" * 32) + "/image.png"):
+            with self.subTest(path=path), self.assertRaises(RuntimeError):
+                validate(path, job)
 
     def test_failure_not_delivered(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -140,34 +129,45 @@ class OfflineFetch(unittest.TestCase):
              patch("subprocess.run", side_effect=copy_stub), redirect_stdout(io.StringIO()):
             MOD["main"]()
 
-    def test_free_substituted_name_accepts_verified_jpeg(self):
+    def test_jpeg_is_rejected_before_any_copy(self):
+        from unittest.mock import Mock
+
+        prompt = self.dest.with_suffix(".prompt.txt")
+        meta = self.dest.with_suffix(".remote.json")
+        for path in (self.dest, prompt, meta):
+            path.write_bytes(b"original")
+        for output in (self.dest, self.jpg):
+            with self.subTest(output=output.name):
+                copied = Mock()
+                with self.assertRaises(RuntimeError):
+                    self.fetch(output, before_copy=copied)
+                copied.assert_not_called()
+                self.assertFalse(self.jpg.exists())
+                for path in (self.dest, prompt, meta):
+                    self.assertEqual(path.read_bytes(), b"original")
+
+    def use_png(self):
+        import hashlib
+        self.raw = b"\x89PNG\r\n\x1a\n" + b"x" * 80
+        self.status.update(output=self.status["output"][:-3] + "png",
+                           sha256=hashlib.sha256(self.raw).hexdigest())
+
+    def test_verified_png_still_delivers_both_receipts(self):
+        self.use_png()
         self.fetch(self.dest)
-        self.assertEqual(self.jpg.read_bytes(), self.raw)
-        self.assertFalse(self.dest.exists())
+        self.assertEqual(self.dest.read_bytes(), self.raw)
+        self.assertEqual(self.dest.with_suffix(".prompt.txt").read_bytes(), b"receipt")
+        meta = json.loads(self.dest.with_suffix(".remote.json").read_text())
+        self.assertEqual(meta["local_sha256"], self.status["sha256"])
+        self.assertTrue(meta["digest_match"])
 
-    def test_substituted_collision_requires_approval(self):
-        self.jpg.write_bytes(b"previous")
-        receipt = self.jpg.with_suffix(".prompt.txt")
-        receipt.write_text("previous receipt")
-        with self.assertRaisesRegex(RuntimeError, "already exists"):
-            self.fetch(self.dest)
-        self.assertEqual(self.jpg.read_bytes(), b"previous")
-        self.assertEqual(receipt.read_text(), "previous receipt")
-        self.assertFalse(self.jpg.with_suffix(".remote.json").exists())
-        self.fetch(self.dest, "--replace-substituted")
-        self.assertEqual(self.jpg.read_bytes(), self.raw)
-
-    def test_substituted_name_created_during_copy_is_preserved(self):
-        with self.assertRaisesRegex(RuntimeError, "already exists"):
-            self.fetch(self.dest, before_copy=lambda: self.jpg.write_bytes(b"other writer"))
-        self.assertEqual(self.jpg.read_bytes(), b"other writer")
-
-    def test_bad_digest_preserves_named_image(self):
-        self.jpg.write_bytes(b"previous")
+    def test_bad_digest_preserves_png(self):
+        self.use_png()
+        self.dest.write_bytes(b"previous")
         self.status["sha256"] = "0" * 64
         with self.assertRaisesRegex(RuntimeError, "digest mismatch"):
-            self.fetch(self.jpg)
-        self.assertEqual(self.jpg.read_bytes(), b"previous")
+            self.fetch(self.dest)
+        self.assertEqual(self.dest.read_bytes(), b"previous")
 
     def test_status_rejects_receipt_link_leaving_job(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -175,7 +175,7 @@ class OfflineFetch(unittest.TestCase):
             job = "a" * 32
             root = home/".subpowers/jobs"/job
             root.mkdir(parents=True)
-            img = root/"image.jpg"
+            img = root/"image.png"
             img.write_bytes(b"fixture")
             other = home/"outside"
             other.write_text("fixture")
