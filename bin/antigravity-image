@@ -470,6 +470,9 @@ else
 fi
 
 {
+  if [[ "${SUBPOWERS_CAROUSEL_RECEIPT:-}" == 1 ]]; then
+    printf 'painter: %s\nreferences: %s\nbytes: %s\n' antigravity "$n" "$bytes"
+  else
   echo "PROMPT (as given):"
   echo "$prompt"
   echo
@@ -494,6 +497,7 @@ fi
   [[ -n "$original" ]] && echo "  signed original: ${original}"
   echo "  agy conversation: ${cid}"
   echo "  bytes: ${bytes}"
+  fi
 } > "${stem}.prompt.txt" || exit 5   # bash 3.2 does not stop on a failed redirect of a { } group
 
 echo "$me: painted by ${painter_ids:-server-chosen model}; driver=${used}; refs=${n}; ${dims}; ${wall}s" >&2

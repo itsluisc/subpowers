@@ -291,6 +291,8 @@ try:
         f"  delivered: {out} ({dims(out)}; painter returned {raw_dims})" + (f"; {'; '.join(notes)}" if notes else ""),
         f"  result url: {url}",
     ]
+    if os.environ.get("SUBPOWERS_CAROUSEL_RECEIPT") == "1":
+        rec = ["painter: higgsfield", f"references: {len(refs)}", f"credits spent: {spent}"]
     with open(f"{stem}.prompt.txt", "w") as f: f.write("\n".join(rec) + "\n")
 except Exception as e:
     say(f"painted (credits spent) but not delivered: {e}. The job's file: {j.get('result_url')}"); sys.exit(5)

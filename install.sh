@@ -58,7 +58,10 @@ elif [[ -n "$link_mode" ]]; then
 else
   if [[ -e "$target" || -L "$target" ]]; then stash "$target" "skill"; fi
   mkdir -p "$target"
-  (cd "$here" && tar --exclude='.git' --exclude='__pycache__' --exclude='*.bak-*' --exclude='.DS_Store' -cf - .) \
+  # A test HOME or --dest may be inside the checkout. Never archive our own output.
+  excludes=(--exclude='.tmp-tests')
+  if [[ "$target" == "$here/"* ]]; then excludes+=("--exclude=./${target#"$here/"}"); fi
+  (cd "$here" && tar "${excludes[@]}" --exclude='.git' --exclude='__pycache__' --exclude='*.bak-*' --exclude='.DS_Store' -cf - .) \
     | (cd "$target" && tar -xf -)
   echo "  copied skill -> $target"
 fi
@@ -91,7 +94,7 @@ fi
 
 # 3. terminal commands and shared stdio MCP server
 mkdir -p "$root/.local/bin"
-bins=(subpowers subpowers-mcp chatgpt-image antigravity-image grok-image grok-video higgsfield-image higgsfield-video higgsfield-soul)
+bins=(subpowers subpowers-mcp chatgpt-image antigravity-image grok-image grok-video higgsfield-image higgsfield-video higgsfield-soul elevenlabs-voice context-ref carousel)
 for c in "${bins[@]}"; do
   [[ -e "$target/bin/$c" ]] && ln -sfn "$target/bin/$c" "$root/.local/bin/$c"
 done

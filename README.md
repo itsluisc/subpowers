@@ -125,6 +125,9 @@ The receipt also says when an image was cropped or upscaled on your machine.
 
 **Will this get my account banned?** subpowers drives the official `codex`, `agy` and `grok` command-line tools on your own login, the same way you would by hand. API-key auth is switched off for every call, so it can only use your plan, and images count against your plan's normal limits. Use your own login on your own machine; don't share it or resell access.
 
+Browser-automation lanes are intentionally not included in this public repo.
+For Google images, use `--painter antigravity` on your own subscription. For Higgsfield images, videos, and Soul IDs, the CLI and MCP tools call the official `higgsfield` CLI. These calls count against your account's usage limits.
+
 **Which plans work?** Tested on ChatGPT Pro, Google AI Pro, The X Subscription (Plus/Premium/Super/Ultra, formerly SuperGrok), and Higgsfield Ultimate. A ChatGPT plan needs Codex access; Grok images/video use The X Subscription shared weekly pool; Higgsfield CLI runs spend plan credits (Higgsfield gates free-unlimited `use_unlim` to `higgsfield.ai` web, Claude chat, Claude Cowork, and ChatGPT). `subpowers doctor` tells you what your logins can do. Found a plan that works (or doesn't)? Open an issue.
 
 **Linux or Windows?** Built and tested on macOS. Linux reports are welcome. Windows is untested.
@@ -322,3 +325,7 @@ Want to build a piece of it? Read [CONTRIBUTING.md](CONTRIBUTING.md), open an is
 ## Credits
 
 The ChatGPT painter started as [oakplank/gpt-image-bridge](https://github.com/oakplank/gpt-image-bridge) (MIT) and was rebuilt from there: newest-model resolver, receipts, reference photos, doctor, installer, and two more painters. Built by [Luis Carrillo](https://github.com/itsluisc) with his agent team. MIT licensed. How the pieces fit: [architecture diagram](docs/diagrams/architecture.md). What changed: [CHANGELOG](CHANGELOG.md).
+
+## Carousel covers
+
+Carousel covers require Pillow and a single-frame JPEG, PNG or WebP. The first slide is re-encoded as PNG.

@@ -1,0 +1,827 @@
+#!/usr/bin/env python3
+"""carousel: style-referenced, brand-voiced, multi-format Instagram/LinkedIn carousel engine.
+
+Builds complete multi-slide carousels anchored to Slide 1 and a creator's style language:
+  - Face-bleed guard: when --refs <person> is set, external creator --style-ref/--style-url
+    images are NOT passed as raw face refs (unless --allow-style-face-ref is explicitly set);
+    use --style-desc for layout/typography/palette so Slides 1..N keep pure likeness.
+  - Brand voice & real offer grounding: --brand-file, --brand, --offer, --cta.
+  - Parallel volume engine: locks Slide 1 first, then paints Slides 2..N
+    concurrently (--parallel N, default 3).
+  - Multi-format outlier engine: --formats-json FILE fans 1 offer/topic across
+    N distinct proven creator formats in one run and builds a combined comparison board.
+  - Per-slide face control: prefix a slide line with [graphic] or [no-face] to paint a clean
+    typographic/diagram interior slide anchored to Slide 1 without forcing a person into it.
+
+Usage:
+  carousel slides.txt OUTDIR [--style-desc "..."] [--style-ref IMG]... [--style-url URL]
+                             [--creator @handle] [--refs NAME] [--cover IMG]
+                             [--brand "..."] [--brand-file FILE] [--offer "..."] [--cta "..."]
+                             [--painter P|council] [--with-higgsfield] [--size 1080x1350]
+                             [--parallel 3] [--allow-style-face-ref] [--test-cover]
+  carousel --topic "<topic>" OUTDIR [--slides 6] [same flags...]
+  carousel --formats-json formats.json OUTDIR [--brand-file FILE] [--offer "..."] [--cta "..."]
+                             [--painter P] [--size 1080x1350] [--parallel 3]
+"""
+from __future__ import annotations
+
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+HERE = Path(__file__).resolve().parent
+SUBPOWERS = str(HERE / "subpowers")
+NO_FACE_RE = re.compile(r"^\[(graphic|no-face|text-only)\]\s*", re.I)
+
+
+def say(msg: str) -> None:
+    print(f"subpowers carousel: {msg}", file=sys.stderr)
+
+
+def read_brand_context(brand: str, brand_file: str) -> str:
+    parts: list[str] = []
+    if brand.strip():
+        parts.append(brand.strip())
+    if brand_file.strip():
+        p = Path(os.path.expanduser(brand_file.strip()))
+        if not p.is_file():
+            raise FileNotFoundError(f"--brand-file not found: {brand_file}")
+        raw = p.read_text(encoding="utf-8", errors="replace").strip()
+        if raw:
+            parts.append(raw[:3500])
+    return "\n\n".join(parts)
+
+
+def plan_slides(
+    topic: str,
+    count: int,
+    context_note: str,
+    brand_context: str,
+    offer: str = "",
+    cta: str = "",
+    style_desc: str = "",
+) -> list[str]:
+    schema = {
+        "type": "object",
+        "properties": {
+            "slides": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": count,
+                "maxItems": count,
+            }
+        },
+        "required": ["slides"],
+        "additionalProperties": False,
+    }
+    schema_path = Path(os.environ.get("TMPDIR", "/tmp")) / f"subpowers-carousel-schema-{os.getpid()}-{int(time.time() * 1000)}.json"
+    schema_path.write_text(json.dumps(schema), encoding="utf-8")
+    try:
+        ask = (
+            f"Write exactly {count} high-retention Instagram carousel slide briefs for topic: {topic}. "
+            "CRITICAL RULE: NEVER write a boring sales brochure or feature/pricing list. "
+            "Reverse-engineer and adapt the EXACT narrative engine of the reference format: its opening hook psychology "
+            "(story tension, weird curiosity gap, or concrete proof teardown), its slide-by-slide buildup and open loops, "
+            "its specific real-world receipts/numbers, and a LATE-STAGE natural bridge to the offer ONLY on the final slide(s). "
+            "Write strictly in the creator's authentic brand voice (zero generic AI clichés, zero corporate filler). "
+            "Slide 1 must be an irresistible scroll-stopping hook with NO hard sales pitch (max 10 words headline + concrete visual scene). "
+            "Middle slides build story tension, proof, or psychological steps (one dominant idea per slide; adjacent slides MUST vary layout). "
+            "Prefix pure infographic/checklist/stat slides that do NOT need the creator's face with [graphic] . "
+            "Final slide bridges naturally into the offer + clear CTA. "
+            "Format each array entry as: [optional graphic tag] Exact on-slide headline and short copy | concrete visual layout and photography/graphic description."
+        )
+        if offer:
+            ask += f"\nExact offer details (use these real facts, prices, dates, and deliverables): {offer[:1500]}."
+        if cta:
+            ask += f"\nExact CTA for the final slide: {cta}."
+        if style_desc:
+            ask += f"\nVisual format aesthetic to match across all slides: {style_desc[:800]}."
+        if brand_context:
+            ask += f"\nCreator brand voice, rules, and boundaries:\n{brand_context[:2600]}"
+        if context_note:
+            ask += f"\nReference style/format context (layout inspiration only; do NOT copy the reference creator's topic or quotes): {context_note[:600]}."
+        r = subprocess.run(
+            ["bash", SUBPOWERS, "think", ask, "--json-schema", str(schema_path)],
+            capture_output=True, text=True, timeout=180,
+        )
+        if r.returncode != 0:
+            raise RuntimeError((r.stderr or r.stdout or "subpowers think failed").strip())
+        data = json.loads(r.stdout)
+        slides = [str(s).strip() for s in (data.get("slides") or []) if str(s).strip()]
+        if len(slides) < 2:
+            raise RuntimeError("planner returned fewer than 2 slides")
+        return slides[:count]
+    finally:
+        try:
+            schema_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def build_contact_sheet(out_jpg: Path, slides: list[Path], title: str = "") -> Path | None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+    except Exception:
+        return None
+    tiles = []
+    H = 640
+    for idx, p in enumerate(slides, 1):
+        try:
+            im = Image.open(p).convert("RGB")
+            tiles.append((f"Slide {idx}", im.resize((max(1, int(im.width * H / im.height)), H), Image.Resampling.LANCZOS)))
+        except Exception:
+            continue
+    if not tiles:
+        return None
+    try:
+        font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 26)
+        title_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 32)
+    except Exception:
+        try:
+            font = ImageFont.truetype("/System/Library/Fonts/HelveticaNeue.ttc", 26)
+            title_font = font
+        except Exception:
+            font = ImageFont.load_default()
+            title_font = font
+    per_row = min(3 if len(tiles) == 6 else 4, len(tiles))
+    rows = [tiles[i:i + per_row] for i in range(0, len(tiles), per_row)]
+    pad = 24
+    gap = 20
+    header_h = 56 if title else 0
+    W = max(sum(t.width for _, t in r) + gap * (len(r) - 1) for r in rows) + pad * 2
+    total_h = header_h + len(rows) * (H + 58) + pad
+    sheet = Image.new("RGB", (W, total_h), (18, 19, 24))
+    d = ImageDraw.Draw(sheet)
+    if title:
+        d.text((pad, 14), title, fill=(248, 249, 252), font=title_font)
+    y = header_h
+    for r in rows:
+        x = pad
+        for label, t in r:
+            d.text((x + 4, y + 14), label, fill=(230, 234, 242), font=font)
+            sheet.paste(t, (x, y + 52))
+            x += t.width + gap
+        y += H + 58
+    sheet.save(out_jpg, quality=90)
+    return out_jpg
+
+
+def build_multi_format_board(out_jpg: Path, decks: list[tuple[str, list[Path]]]) -> Path | None:
+    try:
+        from PIL import Image, ImageDraw, ImageFont  # type: ignore
+    except Exception:
+        return None
+    if not decks:
+        return None
+    H = 380
+    pad, gap, row_hdr, hdr_h = 28, 14, 44, 68
+    rendered_rows: list[tuple[str, list[Image.Image]]] = []
+    for name, paths in decks:
+        imgs = []
+        for p in paths:
+            try:
+                im = Image.open(p).convert("RGB")
+                imgs.append(im.resize((max(1, int(im.width * H / im.height)), H), Image.Resampling.LANCZOS))
+            except Exception:
+                continue
+        if imgs:
+            rendered_rows.append((name, imgs))
+    if not rendered_rows:
+        return None
+    try:
+        f_hdr = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 30)
+        f_row = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 22)
+    except Exception:
+        f_hdr = ImageFont.load_default()
+        f_row = f_hdr
+    W = max(sum(im.width for im in imgs) + gap * (len(imgs) - 1) for _, imgs in rendered_rows) + pad * 2
+    total_h = hdr_h + len(rendered_rows) * (row_hdr + H + 18) + pad
+    board = Image.new("RGB", (W, total_h), (14, 15, 19))
+    d = ImageDraw.Draw(board)
+    d.text((pad, 18), f"ALL {len(rendered_rows)} CAROUSEL FORMATS (FULL SWIPE DECKS)", fill=(248, 249, 252), font=f_hdr)
+    y = hdr_h
+    for name, imgs in rendered_rows:
+        d.text((pad, y + 8), name, fill=(255, 212, 92), font=f_row)
+        x = pad
+        for im in imgs:
+            board.paste(im, (x, y + row_hdr))
+            x += im.width + gap
+        y += row_hdr + H + 18
+    board.save(out_jpg, quality=92)
+    return out_jpg
+
+
+def paint_single_slide(
+    *,
+    idx: int,
+    total: int,
+    raw_line: str,
+    out_slide: Path,
+    painter: str,
+    size: str,
+    refs_name: str,
+    anchor_slide: Path | None,
+    pass_style_refs: list[str],
+    style_directive: str,
+) -> tuple[int, Path, str]:
+    no_face = bool(NO_FACE_RE.match(raw_line))
+    line = NO_FACE_RE.sub("", raw_line).strip()
+    safe_margin = (
+        "Keep ALL text and graphic elements cleanly inside generous 8% safe margins on all four sides "
+        "so zero letters are ever cropped at top, bottom, or side edges. Ultra-sharp exact spelling, "
+        "zero typos, zero stray watermarks, zero gibberish text."
+    )
+    if idx == 1:
+        sprompt = (
+            f"Instagram carousel Slide 1 of {total} (Cover Hook): {line}. "
+            f"{style_directive}{safe_margin}"
+        )
+    else:
+        layout_note = (
+            "Pure graphic/editorial typography slide with NO human face unless explicitly described above; "
+            if no_face else ""
+        )
+        sprompt = (
+            f"Instagram carousel Slide {idx} of {total} continuing the EXACT same visual design system, "
+            f"color palette, background texture, font family, and editorial mood as Slide 1, while using a "
+            f"distinct interior layout (do not repeat the cover layout): {line}. "
+            f"{layout_note}{style_directive}{safe_margin}"
+        )
+
+    cmd = ["bash", SUBPOWERS, "image", sprompt, str(out_slide), "--painter", painter, "--size", size]
+    if refs_name and not no_face:
+        cmd.extend(["--refs", refs_name])
+    if anchor_slide and anchor_slide.is_file():
+        cmd.extend(["--ref", str(anchor_slide)])
+    for sr in pass_style_refs[: (1 if anchor_slide else 2)]:
+        cmd.extend(["--ref", sr])
+
+    say(f"painting slide {idx}/{total} ({painter}, {size}{', graphic' if no_face else ''})")
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=360,
+                       env={**os.environ, "SUBPOWERS_CAROUSEL_RECEIPT": "1"})
+    if r.returncode != 0:
+        raise RuntimeError(f"slide {idx} failed (exit {r.returncode}): {(r.stderr or r.stdout or '').strip()[:300]}")
+    delivered = Path((r.stdout or "").strip().splitlines()[-1]) if (r.stdout or "").strip() else out_slide
+    if not delivered.is_file():
+        delivered = out_slide
+    return idx, delivered, line
+
+
+def write_script_approval_md(out_md: Path, sections: list[dict[str, Any]]) -> Path:
+    lines = [
+        "# Carousel Scripts For Approval (ZERO Images Painted Yet)",
+        "",
+        "Review the hook, story buildup, flow, and exact slide copy below. Edit anything weak before painting.",
+        "",
+    ]
+    for sec in sections:
+        lines.append(f"## {sec['title']}")
+        if sec.get("source_flow"):
+            lines.append(f"- **Source hook/flow adapted:** {sec['source_flow']}")
+        if sec.get("style_desc"):
+            lines.append(f"- **Visual system:** {sec['style_desc'][:220]}")
+        lines.append("")
+        for idx, s in enumerate(sec["slides"], 1):
+            clean = NO_FACE_RE.sub("", s).strip()
+            tag = " *(graphic)*" if NO_FACE_RE.match(s) else ""
+            lines.append(f"{idx}. **Slide {idx}{tag}:** {clean}")
+        lines.append("")
+    out_md.write_text("\n".join(lines), encoding="utf-8")
+    return out_md
+
+
+def reserve_output(directory: Path) -> bool:
+    try:
+        directory.mkdir(parents=True, exist_ok=False)
+        return True
+    except FileExistsError:
+        say("Choose a new output folder; existing plans and deliveries are never reused.")
+        return False
+
+
+def run_single_deck(
+    *,
+    out_dir: Path,
+    topic: str = "",
+    slides_file: Path | None = None,
+    slides_inline: list[str] | None = None,
+    slide_count: int = 5,
+    style_refs: list[str] | None = None,
+    style_url: str = "",
+    style_desc: str = "",
+    creator: str = "",
+    source: str = "auto",
+    refs_name: str = "",
+    cover_path: str = "",
+    painter: str = "auto",
+    with_hf: bool = False,
+    size: str = "1080x1350",
+    brand: str = "",
+    brand_file: str = "",
+    offer: str = "",
+    cta: str = "",
+    parallel: int = 3,
+    allow_style_face_ref: bool = False,
+    test_cover: bool = False,
+    plan_only: bool = True,
+    approved_sha256: str = "",
+    deck_title: str = "",
+    source_flow: str = "",
+) -> tuple[int, list[Path], Path | None, Path | None, list[str]]:
+    if not plan_only and (not slides_file or topic or slides_inline is not None or not approved_sha256):
+        say("Render requires a saved slide file and --approved-sha256 from its review.")
+        return 2, [], None, None, []
+    if not reserve_output(out_dir):
+        return 2, [], None, None, []
+    t0 = time.time()
+    style_refs_local = list(style_refs or [])
+
+    try:
+        brand_context = read_brand_context(brand, brand_file)
+    except FileNotFoundError as exc:
+        say(str(exc))
+        return 2, [], None, None, []
+
+    context_note = ""
+    context_target = style_url or creator
+    if context_target:
+        say("pulling creator/style reference")
+        cr = subprocess.run(
+            [sys.executable, str(HERE / "context-ref"), context_target, "--source", source, "--out-dir", str(out_dir / "_style_context"), "--json"],
+            capture_output=True, text=True, timeout=60,
+        )
+        if cr.returncode != 0:
+            say(f"context lookup failed: {(cr.stderr or cr.stdout).strip()}")
+            return cr.returncode, [], None, None, []
+        cdata = json.loads(cr.stdout)
+        context_note = cdata.get("prompt_context") or ""
+        for p in (cdata.get("ref_images") or [])[:2]:
+            if os.path.isfile(p):
+                style_refs_local.append(p)
+
+    for sr in style_refs_local:
+        if not os.path.isfile(sr):
+            say(f"--style-ref not found: {sr}")
+            return 2, [], None, None, []
+
+    if slides_inline is not None:
+        slides = [str(s).strip() for s in slides_inline if str(s).strip()]
+    elif slides_file is not None:
+        if not slides_file.is_file():
+            say(f"slides file not found: {slides_file}")
+            return 2, [], None, None, []
+        raw = slides_file.read_bytes()
+        if not plan_only and hashlib.sha256(raw).hexdigest() != approved_sha256:
+            say("Slides changed since approval; review the saved file again.")
+            return 2, [], None, None, []
+        slides = [l.strip() for l in raw.decode("utf-8").splitlines() if l.strip() and not l.strip().startswith("#")]
+    else:
+        say(f"planning {slide_count} slides for '{topic}' via subpowers think")
+        try:
+            slides = plan_slides(topic, slide_count, context_note, brand_context, offer=offer, cta=cta, style_desc=style_desc)
+        except Exception as exc:
+            say(f"failed to plan slides: {exc}")
+            return 1, [], None, None, []
+        (out_dir / "slides.txt").write_text("\n".join(slides) + "\n", encoding="utf-8")
+
+    if len(slides) < 1:
+        say("no slides to paint")
+        return 2, [], None, None, []
+
+    if plan_only:
+        (out_dir / "slides.txt").write_text("\n".join(slides) + "\n", encoding="utf-8")
+        review_md = write_script_approval_md(
+            out_dir / "scripts-for-approval.md",
+            [{"title": deck_title or out_dir.name, "source_flow": source_flow, "style_desc": style_desc, "slides": slides}],
+        )
+        digest = hashlib.sha256((out_dir / "slides.txt").read_bytes()).hexdigest()
+        with review_md.open("a", encoding="utf-8") as review:
+            review.write(f"\nAfter approval, render this slides.txt into a new output folder with --approved-sha256 {digest}\n")
+        say(f"SCRIPT-FIRST GATE: wrote {review_md} (0 images painted; approve/edit before rendering)")
+        return 0, [review_md, out_dir / "slides.txt"], None, None, slides
+
+    # Face-bleed guard: never mix another creator's face image with --refs <subject> unless explicitly opted in.
+    pass_style_refs = list(style_refs_local)
+    face_bleed_guarded = False
+    if refs_name and pass_style_refs and not allow_style_face_ref:
+        say(f"face-bleed guard: holding {len(pass_style_refs)} external style image(s) out of --ref because --refs '{refs_name}' is active (use --style-desc for layout/palette or pass --allow-style-face-ref to override)")
+        pass_style_refs = []
+        face_bleed_guarded = True
+
+    directive_parts: list[str] = []
+    if style_desc.strip():
+        directive_parts.append(f"Visual style spec: {style_desc.strip()}.")
+    elif pass_style_refs:
+        directive_parts.append(
+            "Match the editorial design language, color palette, typography hierarchy, lighting contrast, and layout polish "
+            "of the style reference image(s), WITHOUT copying any original logo, watermark, handle, or person from the style reference."
+        )
+    else:
+        directive_parts.append(
+            "Magazine-grade editorial Instagram carousel design with bold readable typography, clean margins, high contrast, and strong visual hierarchy."
+        )
+    if brand.strip():
+        directive_parts.append(f"Brand direction: {brand.strip()}.")
+    style_directive = " ".join(directive_parts) + " "
+
+    if test_cover:
+        cover_out = out_dir / "cover-test.png"
+        slide1_clean = NO_FACE_RE.sub("", slides[0]).strip()
+        cprompt = (
+            f"Carousel Slide 1 of {len(slides)} (Cover): {slide1_clean}. {style_directive}"
+            "Keep all text inside generous 8% safe margins. Sharp editorial graphic, exact spelling, zero stray gibberish text."
+        )
+        cmd = ["bash", SUBPOWERS, "image", cprompt, str(cover_out), "--painter", "council", "--size", size]
+        if with_hf:
+            cmd.append("--with-higgsfield")
+        if refs_name:
+            cmd.extend(["--refs", refs_name])
+        for sr in pass_style_refs[:2]:
+            cmd.extend(["--ref", sr])
+        r = subprocess.run(cmd, text=True, env={**os.environ, "SUBPOWERS_CAROUSEL_RECEIPT": "1"})
+        return r.returncode, [], None, None, slides
+
+    deck_painter = painter
+    if deck_painter in ("council", "all"):
+        say("painting a full deck uses one consistent painter (pass --test-cover first to compare painters on Slide 1); defaulting deck painter to auto")
+        deck_painter = "auto"
+
+    painted_map: dict[int, Path] = {}
+    anchor_slide: Path | None = None
+
+    # Slide 1: either reuse pre-approved --cover or paint Slide 1 first as the design anchor.
+    if cover_path:
+        cp = Path(os.path.expanduser(cover_path))
+        if not cp.is_file():
+            say(f"--cover not found: {cover_path}")
+            return 2, [], None, None, slides
+        s1_out = out_dir / "01.png"
+        try:
+            from PIL import Image, ImageOps
+        except ImportError:
+            say("--cover needs Pillow to decode and write a PNG; no slide published")
+            return 2, [], None, None, slides
+        try:
+            with Image.open(cp, formats=("JPEG", "PNG", "WEBP")) as im:
+                if getattr(im, "n_frames", 1) != 1:
+                    raise ValueError("animated cover")
+                pixels = ImageOps.exif_transpose(im).convert("RGBA")
+            pixels.info.clear()
+            pixels.save(s1_out, format="PNG")
+        except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+            s1_out.unlink(missing_ok=True)
+            say("--cover must be a decodable, single-frame JPEG, PNG or WebP")
+            return 2, [], None, None, slides
+        painted_map[1] = s1_out
+        anchor_slide = s1_out
+        say(f"using pre-approved cover as Slide 1 anchor: {cp}")
+    else:
+        try:
+            _, delivered1, _ = paint_single_slide(
+                idx=1,
+                total=len(slides),
+                raw_line=slides[0],
+                out_slide=out_dir / "01.png",
+                painter=deck_painter,
+                size=size,
+                refs_name=refs_name,
+                anchor_slide=None,
+                pass_style_refs=pass_style_refs,
+                style_directive=style_directive,
+            )
+        except Exception as exc:
+            say(str(exc))
+            return 1, [], None, None, slides
+        painted_map[1] = delivered1
+        anchor_slide = delivered1
+
+    # Slides 2..N: anchored to Slide 1, painted in parallel for volume speed.
+    rest_indices = list(range(2, len(slides) + 1))
+    workers = max(1, min(5, parallel, len(rest_indices) or 1))
+    if rest_indices:
+        if workers == 1:
+            for idx in rest_indices:
+                try:
+                    _, deliv, _ = paint_single_slide(
+                        idx=idx,
+                        total=len(slides),
+                        raw_line=slides[idx - 1],
+                        out_slide=out_dir / f"{idx:02d}.png",
+                        painter=deck_painter,
+                        size=size,
+                        refs_name=refs_name,
+                        anchor_slide=anchor_slide,
+                        pass_style_refs=pass_style_refs,
+                        style_directive=style_directive,
+                    )
+                    painted_map[idx] = deliv
+                except Exception as exc:
+                    say(str(exc))
+                    return 1, [], None, None, slides
+        else:
+            say(f"painting slides 2..{len(slides)} in parallel (workers={workers}) anchored to Slide 1")
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                futs = {
+                    ex.submit(
+                        paint_single_slide,
+                        idx=idx,
+                        total=len(slides),
+                        raw_line=slides[idx - 1],
+                        out_slide=out_dir / f"{idx:02d}.png",
+                        painter=deck_painter,
+                        size=size,
+                        refs_name=refs_name,
+                        anchor_slide=anchor_slide,
+                        pass_style_refs=pass_style_refs,
+                        style_directive=style_directive,
+                    ): idx
+                    for idx in rest_indices
+                }
+                for fut in as_completed(futs):
+                    try:
+                        idx_done, deliv, _ = fut.result()
+                        painted_map[idx_done] = deliv
+                    except Exception as exc:
+                        say(str(exc))
+                        return 1, [], None, None, slides
+
+    painted = [painted_map[i] for i in sorted(painted_map)]
+    grid = build_contact_sheet(out_dir / "carousel-grid.jpg", painted, title=deck_title)
+    webp = out_dir / "carousel.webp"
+    webp_ok = False
+    if len(painted) >= 2 and (HERE / "slideshow").is_file():
+        try:
+            rs = subprocess.run(
+                [sys.executable, str(HERE / "slideshow"), str(webp), *[str(p) for p in painted], "--hold", "1.6", "--width", "720"],
+                capture_output=True, text=True, timeout=90,
+            )
+            webp_ok = rs.returncode == 0 and webp.is_file() and webp.stat().st_size > 0
+        except subprocess.TimeoutExpired:
+            say("slideshow webp timed out after 90s; skipping animated preview")
+            webp.unlink(missing_ok=True)
+            webp_ok = False
+
+    rec = [
+        "subpowers carousel receipt",
+        f"door: subpowers carousel ({deck_painter}, parallel={workers})",
+        f"slides: {len(painted)}, size: {size}",
+        f"refs: {Path(refs_name).name or 'none'}",
+        f"face_bleed_guarded: {'yes' if face_bleed_guarded else 'no'}",
+        f"style_refs_passed: {', '.join(Path(ref).name for ref in pass_style_refs) if pass_style_refs else 'none'}",
+        f"style_desc: {style_desc[:240] if style_desc else 'none'}",
+        f"style_source: {'external' if context_target else 'local'}",
+        f"brand_file: {Path(brand_file).name or 'none'}",
+        f"offer: {offer[:200] if offer else 'none'}",
+        f"grid: {grid.name if grid else 'skipped (Pillow needed)'}",
+        f"swipe_preview: {webp.name if webp_ok else 'skipped'}",
+        f"took: {round(time.time() - t0, 1)} s",
+        "",
+        "SLIDES:",
+        *[f"{idx}. {s}" for idx, s in enumerate(slides, 1)],
+    ]
+    (out_dir / "carousel.prompt.txt").write_text("\n".join(rec) + "\n", encoding="utf-8")
+    return 0, painted, grid, (webp if webp_ok else None), slides
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 0 if argv else 2
+
+    topic = ""
+    slides_file: Path | None = None
+    formats_json: Path | None = None
+    out_dir: Path | None = None
+    slide_count = 5
+    style_refs: list[str] = []
+    style_url = ""
+    style_desc = ""
+    creator = ""
+    refs_name = ""
+    cover_path = ""
+    painter = os.environ.get("SUBPOWERS_PAINTER", "auto")
+    with_hf = False
+    size = "1080x1350"
+    brand = ""
+    brand_file = ""
+    offer = ""
+    cta = ""
+    test_cover = False
+    plan_only = True
+    approved_sha256 = ""
+    source = "auto"
+    parallel = 3
+    allow_style_face_ref = False
+
+    i = 0
+    if argv[0] == "--topic":
+        if len(argv) < 3:
+            say('usage: subpowers carousel --topic "<topic>" OUTDIR [--slides 5] [--style-ref IMG]...')
+            return 2
+        topic = argv[1]
+        out_dir = Path(argv[2]).resolve()
+        i = 3
+    elif argv[0] == "--formats-json":
+        if len(argv) < 3:
+            say("usage: subpowers carousel --formats-json formats.json OUTDIR [...]")
+            return 2
+        formats_json = Path(argv[1]).resolve()
+        out_dir = Path(argv[2]).resolve()
+        i = 3
+    else:
+        if len(argv) < 2:
+            say("usage: subpowers carousel slides.txt OUTDIR [--style-ref IMG]...")
+            return 2
+        slides_file = Path(argv[0])
+        out_dir = Path(argv[1]).resolve()
+        i = 2
+
+    while i < len(argv):
+        a = argv[i]
+        if a == "--slides" and i + 1 < len(argv):
+            try:
+                slide_count = max(2, min(10, int(argv[i + 1])))
+            except ValueError:
+                say("--slides must be 2 to 10"); return 2
+            i += 2
+        elif a in ("--style-ref", "--ref") and i + 1 < len(argv):
+            style_refs.append(argv[i + 1]); i += 2
+        elif a in ("--style-url", "--from-url") and i + 1 < len(argv):
+            style_url = argv[i + 1]; i += 2
+        elif a == "--style-desc" and i + 1 < len(argv):
+            style_desc = argv[i + 1]; i += 2
+        elif a == "--creator" and i + 1 < len(argv):
+            creator = argv[i + 1]; i += 2
+        elif a == "--source" and i + 1 < len(argv):
+            source = argv[i + 1]; i += 2
+        elif a == "--refs" and i + 1 < len(argv):
+            refs_name = argv[i + 1]; i += 2
+        elif a == "--cover" and i + 1 < len(argv):
+            cover_path = argv[i + 1]; i += 2
+        elif a == "--painter" and i + 1 < len(argv):
+            painter = argv[i + 1]; i += 2
+        elif a == "--with-higgsfield":
+            with_hf = True; i += 1
+        elif a == "--size" and i + 1 < len(argv):
+            size = argv[i + 1]; i += 2
+        elif a == "--brand" and i + 1 < len(argv):
+            brand = argv[i + 1]; i += 2
+        elif a == "--brand-file" and i + 1 < len(argv):
+            brand_file = argv[i + 1]; i += 2
+        elif a == "--offer" and i + 1 < len(argv):
+            offer = argv[i + 1]; i += 2
+        elif a == "--cta" and i + 1 < len(argv):
+            cta = argv[i + 1]; i += 2
+        elif a == "--parallel" and i + 1 < len(argv):
+            try:
+                parallel = max(1, min(5, int(argv[i + 1])))
+            except ValueError:
+                say("--parallel must be 1 to 5"); return 2
+            i += 2
+        elif a == "--allow-style-face-ref":
+            allow_style_face_ref = True; i += 1
+        elif a == "--approved-sha256" and i + 1 < len(argv):
+            approved_sha256 = argv[i+1]; plan_only = False; i += 2
+        elif a == "--plan-only":
+            plan_only = True; i += 1
+        elif a == "--test-cover":
+            test_cover = True; i += 1
+        else:
+            say(f"unknown arg: {a}"); return 2
+
+    if not plan_only and slides_file is None:
+        say("Approve and render each saved slides.txt, not a topic or batch.")
+        return 2
+    assert out_dir is not None
+
+    if formats_json is not None:
+        if not formats_json.is_file():
+            say(f"--formats-json file not found: {formats_json}")
+            return 2
+        spec_data = json.loads(formats_json.read_text(encoding="utf-8"))
+        formats_list = spec_data if isinstance(spec_data, list) else (spec_data.get("formats") or [])
+        if not isinstance(formats_list, list) or not formats_list:
+            say("--formats-json must contain a non-empty list of formats")
+            return 2
+        if not reserve_output(out_dir):
+            return 2
+        shared_topic = spec_data.get("topic", topic) if isinstance(spec_data, dict) else topic
+        shared_brand = spec_data.get("brand", brand) if isinstance(spec_data, dict) else brand
+        shared_brand_file = spec_data.get("brand_file", brand_file) if isinstance(spec_data, dict) else brand_file
+        shared_offer = spec_data.get("offer", offer) if isinstance(spec_data, dict) else offer
+        shared_cta = spec_data.get("cta", cta) if isinstance(spec_data, dict) else cta
+
+        all_decks: list[tuple[str, list[Path]]] = []
+        plan_sections: list[dict[str, Any]] = []
+        printed_paths: list[str] = []
+        for idx_f, fmt in enumerate(formats_list, 1):
+            if not isinstance(fmt, dict):
+                say(f"format #{idx_f} must be a JSON object")
+                return 2
+            slug = re.sub(r"[^a-zA-Z0-9._-]+", "-", str(fmt.get("name") or f"format-{idx_f}")).strip("-") or f"format-{idx_f}"
+            f_dir = out_dir / slug
+            if f_dir.resolve().parent != out_dir or f_dir.is_symlink():
+                say("Format folder must stay directly inside the batch output root.")
+                return 2
+            f_slides_file = Path(fmt["slides_file"]) if fmt.get("slides_file") else None
+            f_slides_inline = fmt.get("slides") if isinstance(fmt.get("slides"), list) else None
+            rc, painted, grid, webp, used_slides = run_single_deck(
+                out_dir=f_dir,
+                topic=str(fmt.get("topic") or shared_topic or ""),
+                slides_file=f_slides_file,
+                slides_inline=f_slides_inline,
+                slide_count=int(fmt.get("slide_count") or slide_count),
+                style_refs=list(fmt.get("style_refs") or []),
+                style_url=str(fmt.get("style_url") or ""),
+                style_desc=str(fmt.get("style_desc") or style_desc),
+                creator=str(fmt.get("creator") or ""),
+                source=source,
+                refs_name=str(fmt.get("refs") or refs_name),
+                cover_path=str(fmt.get("cover") or ""),
+                painter=str(fmt.get("painter") or painter),
+                with_hf=bool(fmt.get("with_higgsfield", with_hf)),
+                size=str(fmt.get("size") or size),
+                brand=str(fmt.get("brand") or shared_brand),
+                brand_file=str(fmt.get("brand_file") or shared_brand_file),
+                offer=str(fmt.get("offer") or shared_offer),
+                cta=str(fmt.get("cta") or shared_cta),
+                parallel=int(fmt.get("parallel") or parallel),
+                allow_style_face_ref=bool(fmt.get("allow_style_face_ref", allow_style_face_ref)),
+                test_cover=test_cover,
+                plan_only=plan_only,
+                deck_title=str(fmt.get("title") or fmt.get("name") or slug),
+                source_flow=str(fmt.get("source_flow") or ""),
+            )
+            if rc != 0:
+                return rc
+            if plan_only:
+                plan_sections.append({
+                    "title": str(fmt.get("title") or fmt.get("name") or slug),
+                    "source_flow": str(fmt.get("source_flow") or ""),
+                    "style_desc": str(fmt.get("style_desc") or style_desc),
+                    "slides": used_slides,
+                })
+            else:
+                all_decks.append((str(fmt.get("title") or fmt.get("name") or slug), painted))
+                if grid:
+                    printed_paths.append(str(grid))
+                if webp:
+                    printed_paths.append(str(webp))
+
+        if plan_only:
+            master_md = write_script_approval_md(out_dir / "scripts-for-approval.md", plan_sections)
+            print(str(master_md))
+            return 0
+
+        master_board = build_multi_format_board(out_dir / "all-formats-board.jpg", all_decks)
+        for p in printed_paths:
+            print(p)
+        if master_board:
+            print(str(master_board))
+        return 0
+
+    rc, painted, grid, webp, _ = run_single_deck(
+        out_dir=out_dir,
+        topic=topic,
+        slides_file=slides_file,
+        slide_count=slide_count,
+        style_refs=style_refs,
+        style_url=style_url,
+        style_desc=style_desc,
+        creator=creator,
+        source=source,
+        refs_name=refs_name,
+        cover_path=cover_path,
+        painter=painter,
+        with_hf=with_hf,
+        size=size,
+        brand=brand,
+        brand_file=brand_file,
+        offer=offer,
+        cta=cta,
+        parallel=parallel,
+        allow_style_face_ref=allow_style_face_ref,
+        test_cover=test_cover,
+        plan_only=plan_only,
+        approved_sha256=approved_sha256,
+    )
+    if rc != 0:
+        return rc
+    for p in painted:
+        print(str(p))
+    if grid:
+        print(str(grid))
+    if webp:
+        print(str(webp))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))
