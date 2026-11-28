@@ -86,6 +86,8 @@ TOOLS = [
                     "description": "Absolute local paths to reference images (face, room/environment, product, brand logo).",
                 },
                 "match_set": {"type": "string", "description": "Video path (optional @seconds) to extract a person-free set plate for lighting and palette."},
+                "from_url": {"type": "string", "description": "Public URL (X post, YouTube/IG/TikTok video, or webpage) to pull grounded context and reference images from."},
+                "context_file": {"type": "string", "description": "Local transcript or board text file (e.g. from TokScript or Poppy AI) to ground the prompt."},
                 "into_project": {"type": "string", "description": "Optional HyperFrames project directory to mount the result into as a layer."},
                 "at": {"type": "number", "description": "Start time in seconds when using into_project."},
                 "duration": {"type": "number", "description": "Layer duration in seconds when using into_project."},
@@ -158,6 +160,8 @@ TOOLS = [
                 "location_image": {"type": "string", "description": "Higgsfield Intone room/location photo (use with model='intone')."},
                 "refs": {"type": "string", "description": "Saved reference set name."},
                 "ref_paths": {"type": "array", "items": {"type": "string"}, "description": "Reference image or video paths."},
+                "from_url": {"type": "string", "description": "Public URL (X post, YouTube/IG/TikTok video, or webpage) to pull grounded context and reference imagery from."},
+                "context_file": {"type": "string", "description": "Local transcript or board note file to ground the video prompt."},
                 "audio_paths": {"type": "array", "items": {"type": "string"}, "description": "Higgsfield-only audio reference paths (2-30s for Intone; rhythm/VO for Seedance 2.5 Omni Reference)."},
                 "voice": {"type": "string", "description": "Grok-only preset voice (e.g. ara, eve, leo, rex)."},
                 "duration": {"type": "integer", "description": "Clip duration in seconds (1-15 for Grok; model-dependent for Higgsfield)."},
@@ -205,6 +209,88 @@ TOOLS = [
                 "wait": {"type": "boolean", "default": False, "description": "Wait for training completion (takes ~10 min)."},
             },
             "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_voice",
+        "description": (
+            "Opt-in PAID creator tool (ElevenLabs CLI, spends ElevenLabs plan characters/credits; ask user first "
+            "for paid generations). Supports status, voices lookup, speak (TTS), sfx (sound effects), and music beds."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "action": {"type": "string", "enum": ["status", "voices", "speak", "sfx", "music"], "default": "status"},
+                "text": {"type": "string", "description": "Spoken script (speak) or audio prompt (sfx/music)."},
+                "output_path": {"type": "string", "description": "Absolute destination .mp3 or .wav path (for speak/sfx/music)."},
+                "voice": {"type": "string", "description": "ElevenLabs voice name or ID (for speak)."},
+                "search": {"type": "string", "description": "Optional voice filter term (for voices)."},
+                "category": {"type": "string", "description": "Optional voice category: cloned, professional, premade."},
+                "model": {"type": "string", "description": "Optional ElevenLabs model ID override."},
+                "duration": {"type": "number", "description": "Duration in seconds (sfx 0.5-30s, music 3-600s)."},
+                "loop": {"type": "boolean", "default": False, "description": "Loop smoothly (sfx only)."},
+                "instrumental": {"type": "boolean", "default": False, "description": "Force instrumental (music only)."},
+                "dry_run": {"type": "boolean", "default": False, "description": "Estimate character cost without spending credits."},
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_context",
+        "description": (
+            "Extract grounded context and reference images from any public URL (X post, YouTube/IG/TikTok video, webpage) "
+            "or @creator handle (using opt-in paid tools TokScript or Poppy AI when configured)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Public http(s) URL, @creator handle, or 'status'."},
+                "source": {"type": "string", "enum": ["auto", "public", "tokscript", "poppy"], "default": "auto"},
+                "max_images": {"type": "integer", "default": 3, "description": "Max reference images to download (0-6)."},
+                "no_images": {"type": "boolean", "default": False},
+            },
+            "required": ["target"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "subpowers_carousel",
+        "description": (
+            "Build complete, brand-voiced, multi-slide (or multi-format batch) Instagram/LinkedIn carousel decks "
+            "anchored to Slide 1 with face-bleed protection, brand-file/offer grounding, and parallel slide painting."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "output_dir": {"type": "string", "description": "Absolute destination directory for slide PNGs, grid JPG, and swipe WEBP."},
+                "topic": {"type": "string", "description": "Topic to auto-plan slides via subpowers think (if slides_file and formats_json are omitted)."},
+                "slides_file": {"type": "string", "description": "Absolute path to a slides.txt file (one slide prompt per line; prefix [graphic] for text/diagram slides without a face)."},
+                "formats_json": {"type": "string", "description": "Absolute path to a multi-format JSON spec (1 idea -> N full carousel decks + combined comparison board)."},
+                "slides": {"type": "integer", "default": 5, "description": "Number of slides (2-10) when planning from topic."},
+                "style_refs": {"type": "array", "items": {"type": "string"}, "description": "Local creator carousel screenshot(s) to match style/typography/palette."},
+                "style_url": {"type": "string", "description": "Creator IG carousel / X post / webpage URL to pull style & context from."},
+                "style_desc": {"type": "string", "description": "Explicit visual style direction (layout, palette, typography, mood) for face-bleed-safe transfer."},
+                "creator": {"type": "string", "description": "Creator @handle to pull reference posts via opt-in Poppy AI or TokScript."},
+                "source": {"type": "string", "enum": ["auto", "public", "tokscript", "poppy"], "default": "auto"},
+                "refs": {"type": "string", "description": "Saved person/brand reference set name."},
+                "cover": {"type": "string", "description": "Absolute path to a pre-approved Slide 1 cover image to anchor Slides 2..N."},
+                "painter": {"type": "string", "enum": ["auto", "chatgpt", "antigravity", "grok", "higgsfield", "council"], "default": "auto"},
+                "with_higgsfield": {"type": "boolean", "default": False},
+                "size": {"type": "string", "default": "1080x1350", "description": "Slide size (default 1080x1350 Instagram 4:5)."},
+                "brand": {"type": "string", "description": "Short brand direction or palette note."},
+                "brand_file": {"type": "string", "description": "Absolute path to a brand.md or voice guide file."},
+                "offer": {"type": "string", "description": "Exact product/offer details (price, deliverables, dates) to keep copy grounded."},
+                "cta": {"type": "string", "description": "Exact closing CTA (e.g. Comment ATTITUDE for the $99 link)."},
+                "parallel": {"type": "integer", "default": 3, "description": "Parallel workers for Slides 2..N (1-5)."},
+                "allow_style_face_ref": {"type": "boolean", "default": False, "description": "Opt-in override to pass external style_refs alongside --refs (disabled by default to prevent face bleed)."},
+                "stage": {"type": "string", "enum": ["plan", "render"], "default": "plan", "description": "SCRIPT-FIRST GATE: 'plan' (default) drafts hooks/story/copy to scripts-for-approval.md with ZERO images painted; pass 'render' + approved=true ONLY after user approves the scripts."},
+                "approved_sha256": {"type": "string", "description": "Digest of reviewed slides.txt, required for render."},
+                "approved": {"type": "boolean", "default": False, "description": "Required true when stage='render' to confirm the user already approved the slide scripts before painting."},
+                "test_cover": {"type": "boolean", "default": False, "description": "Paint Slide 1 across a multi-painter council first so user picks winning style."},
+            },
+            "required": ["output_dir"],
             "additionalProperties": False,
         },
     },
@@ -414,6 +500,10 @@ def handle_tool(name, args):
             cmd.extend(["--ref", rp])
         if args.get("match_set"):
             cmd.extend(["--match-set", str(args["match_set"])])
+        if args.get("from_url"):
+            cmd.extend(["--from-url", str(args["from_url"])])
+        if args.get("context_file"):
+            cmd.extend(["--context-file", str(args["context_file"])])
         if into:
             cmd.extend(["--into", str(into)])
             if args.get("at") is not None:
@@ -532,6 +622,10 @@ def handle_tool(name, args):
             cmd.extend(["--ref", rp])
         for ap in audio_paths:
             cmd.extend(["--audio", ap])
+        if args.get("from_url"):
+            cmd.extend(["--from-url", str(args["from_url"])])
+        if args.get("context_file"):
+            cmd.extend(["--context-file", str(args["context_file"])])
         if args.get("voice"):
             cmd.extend(["--voice", str(args["voice"])])
         if args.get("duration") is not None:
@@ -564,6 +658,166 @@ def handle_tool(name, args):
             "exit_code": rc,
             "paths": lines,
             "receipt": read_receipt_for(lines),
+            "stderr": err,
+        }
+
+    if name == "subpowers_voice":
+        action = args.get("action", "status")
+        if action not in ("status", "voices", "speak", "sfx", "music"):
+            return False, {"error": "'action' must be status, voices, speak, sfx, or music"}
+        dry_run = expect_bool(args, "dry_run", False)
+        loop = expect_bool(args, "loop", False)
+        instrumental = expect_bool(args, "instrumental", False)
+        cmd = ["bash", SUBPOWERS, "voice", action]
+        if action in ("status", "voices"):
+            if args.get("search"):
+                cmd.extend(["--search", str(args["search"])])
+            if args.get("category"):
+                cmd.extend(["--category", str(args["category"])])
+            cmd.append("--json")
+            rc, out, err = run_cmd(cmd, timeout=45)
+            parsed = None
+            try:
+                parsed = json.loads(out) if out else None
+            except Exception:
+                pass
+            return rc == 0, {"ok": rc == 0, "exit_code": rc, "paid_tool": "elevenlabs", "data": parsed, "stderr": err}
+        text = args.get("text")
+        if not text or not isinstance(text, str):
+            return False, {"error": "'text' must be a non-empty string"}
+        out_path = validate_output_path(args.get("output_path"))
+        cmd.extend([text, out_path])
+        if action == "speak" and args.get("voice"):
+            cmd.extend(["--voice", str(args["voice"])])
+        if args.get("model"):
+            cmd.extend(["--model", str(args["model"])])
+        if args.get("duration") is not None:
+            cmd.extend(["--duration", str(args["duration"])])
+        if loop and action == "sfx":
+            cmd.append("--loop")
+        if instrumental and action == "music":
+            cmd.append("--instrumental")
+        if dry_run:
+            cmd.append("--dry-run")
+        rc, out, err = run_cmd(cmd, timeout=300)
+        lines = [l for l in out.splitlines() if l.strip()]
+        parsed = None
+        if dry_run:
+            try:
+                parsed = json.loads(out) if out else None
+            except Exception:
+                pass
+        return rc == 0, {
+            "ok": rc == 0,
+            "exit_code": rc,
+            "paid_tool": "elevenlabs",
+            "paths": [] if parsed is not None else lines,
+            "dry_run": parsed,
+            "receipt": None if parsed is not None else read_receipt_for(lines),
+            "stderr": err,
+        }
+
+    if name == "subpowers_context":
+        target = args.get("target")
+        if not target or not isinstance(target, str):
+            return False, {"error": "'target' must be a non-empty URL, @handle, or 'status'"}
+        source = args.get("source", "auto")
+        if source not in ("auto", "public", "tokscript", "poppy"):
+            return False, {"error": "'source' must be auto, public, tokscript, or poppy"}
+        no_images = expect_bool(args, "no_images", False)
+        cmd = ["bash", SUBPOWERS, "context", target, "--json"]
+        if target != "status":
+            cmd.extend(["--source", source])
+            if args.get("max_images") is not None:
+                cmd.extend(["--max-images", str(args["max_images"])])
+            if no_images:
+                cmd.append("--no-images")
+        rc, out, err = run_cmd(cmd, timeout=60)
+        parsed = None
+        try:
+            parsed = json.loads(out) if out else None
+        except Exception:
+            pass
+        return rc == 0, {"ok": rc == 0, "exit_code": rc, "context": parsed, "stderr": err}
+
+    if name == "subpowers_carousel":
+        out_dir = validate_output_path(args.get("output_dir"))
+        topic = args.get("topic")
+        slides_file = args.get("slides_file")
+        formats_json = args.get("formats_json")
+        if not topic and not slides_file and not formats_json:
+            return False, {"error": "provide 'topic', 'slides_file', or 'formats_json'"}
+        if slides_file:
+            slides_file = validate_output_path(slides_file)
+        if formats_json:
+            formats_json = validate_output_path(formats_json)
+        style_refs = expect_str_list(args, "style_refs")
+        with_hf = expect_bool(args, "with_higgsfield", False)
+        test_cover = expect_bool(args, "test_cover", False)
+        allow_face_ref = expect_bool(args, "allow_style_face_ref", False)
+        stage = str(args.get("stage") or "plan").strip().lower()
+        approved = expect_bool(args, "approved", False)
+        if stage not in ("plan", "render"):
+            return False, {"error": "stage must be 'plan' or 'render'"}
+        digest = args.get("approved_sha256", "")
+        if stage == "render" and not (approved and slides_file and not topic and not formats_json
+                                      and isinstance(digest, str) and re.fullmatch("[0-9a-f]{64}", digest)):
+            return False, {"error": "SCRIPT-FIRST GATE: render requires only the saved slides_file, approved=true, and its reviewed approved_sha256."}
+        if args.get("refs") is not None:
+            validate_ref_name(args["refs"])
+        cmd = ["bash", SUBPOWERS, "carousel"]
+        if formats_json:
+            cmd.extend(["--formats-json", formats_json, out_dir])
+        elif slides_file:
+            cmd.extend([slides_file, out_dir])
+        else:
+            cmd.extend(["--topic", str(topic), out_dir])
+            if args.get("slides") is not None:
+                cmd.extend(["--slides", str(args["slides"])])
+        for sr in style_refs:
+            cmd.extend(["--style-ref", sr])
+        if args.get("style_url"):
+            cmd.extend(["--style-url", str(args["style_url"])])
+        if args.get("style_desc"):
+            cmd.extend(["--style-desc", str(args["style_desc"])])
+        if args.get("creator"):
+            cmd.extend(["--creator", str(args["creator"])])
+        if args.get("source"):
+            cmd.extend(["--source", str(args["source"])])
+        if args.get("refs"):
+            cmd.extend(["--refs", str(args["refs"])])
+        if args.get("cover"):
+            cmd.extend(["--cover", validate_output_path(args["cover"])])
+        if args.get("painter"):
+            cmd.extend(["--painter", str(args["painter"])])
+        if with_hf:
+            cmd.append("--with-higgsfield")
+        if args.get("size"):
+            cmd.extend(["--size", str(args["size"])])
+        if args.get("brand"):
+            cmd.extend(["--brand", str(args["brand"])])
+        if args.get("brand_file"):
+            cmd.extend(["--brand-file", validate_output_path(args["brand_file"])])
+        if args.get("offer"):
+            cmd.extend(["--offer", str(args["offer"])])
+        if args.get("cta"):
+            cmd.extend(["--cta", str(args["cta"])])
+        if args.get("parallel") is not None:
+            cmd.extend(["--parallel", str(args["parallel"])])
+        if allow_face_ref:
+            cmd.append("--allow-style-face-ref")
+        if stage == "plan":
+            cmd.append("--plan-only")
+        else:
+            cmd.extend(["--approved-sha256", digest])
+        if test_cover:
+            cmd.append("--test-cover")
+        rc, out, err = run_cmd(cmd, timeout=900)
+        lines = [l for l in out.splitlines() if l.strip()]
+        return rc == 0, {
+            "ok": rc == 0,
+            "exit_code": rc,
+            "paths": lines,
             "stderr": err,
         }
 

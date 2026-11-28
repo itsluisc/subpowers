@@ -345,6 +345,9 @@ PY
 )"
 
 {
+  if [[ "${SUBPOWERS_CAROUSEL_RECEIPT:-}" == 1 ]]; then
+    printf 'painter: %s\nreferences: %s\nbytes: %s\n' grok "$n" "$bytes"
+  else
   echo "PROMPT (as given):"
   echo "$prompt"
   echo
@@ -367,6 +370,7 @@ PY
   echo "  grok session: ${session} (saved file: ${saved})"
   echo "  wall time: ${wall}s"
   echo "  bytes: ${bytes}"
+  fi
 } > "${stem}.prompt.txt" || exit 5   # bash 3.2 does not stop on a failed redirect of a { } group
 
 echo "grok-image: painted by Grok Imagine (C2PA: ${c2pa}); model requested=${imodel_note}; tool=${tool}; driver=${driver:-default} @${effort}; refs=${n}; size=${dims}; ${wall}s" >&2

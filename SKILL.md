@@ -84,7 +84,14 @@ subpowers --version   # installed version
 ## Storyboards, Video & Stop-Motion
 
 - **Storyboards:** one shot per line in `shots.txt`, parallel painting into `storyboard.jpg`.
-- **Video:** `subpowers video "<prompt>" out.mp4` defaults to **Grok Imagine 1.5** (included in The X Subscription, 1 to 15 s, 480p or 720p, sound + `--voice`). With no `--first`/`--ref`, it paints the first frame on your image plan first. Pass `--painter higgsfield [--model seedance_2_5|kling4_0|veo3_1]` for Higgsfield video (priced first, capped at `HIGGSFIELD_VIDEO_MAX_CREDITS`).
+- **Video:** `subpowers video "<prompt>" out.mp4` defaults to **Grok Imagine 1.5** (included in The X Subscription, 1 to 15 s, 480p or 720p, sound + `--voice`). With no `--first`/`--ref`, it paints the first frame on your image plan first. Pass `--painter higgsfield [--model seedance_2_5|gemini_omni_flash_1_2|intone|kling4_0|veo3_1]` for Higgsfield video (priced first, capped at `HIGGSFIELD_VIDEO_MAX_CREDITS`), or `subpowers intone out.mp4 --character IMG --location IMG (--audio VOICE.wav | --speak "TEXT" [--voice NAME])`.
+- **Style-Referenced Carousels (`subpowers carousel`):** fixes boring carousels by anchoring Slide 1 to a creator's carousel reference (`--style-ref IMG`, `--style-url URL`, or `--creator @handle`), then anchoring Slides 2..N to Slide 1 + style ref (`--test-cover` paints a 3-to-4 painter cover council first; outputs `01.png..NN.png`, `carousel-grid.jpg`, and `carousel.webp`).
+- **URL & Creator Context (`--from-url URL` / `--context-file FILE` / `subpowers context`):** pulls grounded post text + real reference images from any public X post, YouTube/TikTok/IG URL, or webpage through direct, destination-checked requests. External downloaders and proxies are disabled.
+- **Opt-in Paid / Creator Tools (clearly separated from $0 subscriptions; never auto-invoked):**
+  - **Higgsfield** (`--painter higgsfield`, `--soul-id`, `intone`): spends Higgsfield plan credits (priced first + capped).
+  - **ElevenLabs** (`subpowers voice status|voices|speak|sfx|music`, or `intone --speak`): spends ElevenLabs plan characters/credits; ask user before paid generation (supports `--dry-run`, `elevenlabs auth login` OAuth Keychain, or `ELEVENLABS_API_KEY`).
+  - **Poppy AI & TokScript** (`subpowers context <URL|@handle> --source poppy|tokscript`): opt-in paid creator-library tools for IG/TikTok/YT viral transcripts, hooks, on-screen text, and carousel references (`POPPY_MCP_KEY` / `TOKSCRIPT_API_KEY` via env or `SUBPOWERS_ENV_FILES` in `~/.subpowers/config`).
+- **Carousel approval:** Topic or format inputs produce plans only. Review the saved `slides.txt`; render that file into a new output folder with `--approved-sha256 DIGEST` from the review. Edits invalidate that digest.
 - **Stop-motion:** `subpowers stopmotion "<concept>" out.mp4` plans frames via `subpowers think`, anchors every frame to frame 1 (`--chain` optional), and encodes H.264 `.mp4` + looping `.webp` (`--resume` skips finished frames).
 
 ## Into a HyperFrames Project (`--into PROJECT`)

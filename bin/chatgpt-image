@@ -361,6 +361,9 @@ PY
 )"
 painter="OpenAI's current ChatGPT image model, chosen server-side (last confirmed on this path: GPT Image 2.5, rolled to Codex 2026-09-08; Images 2.6 was announced 2026-11-04 but which version answered is not visible on this path) | C2PA says: ${c2pa}"
 {
+  if [[ "${SUBPOWERS_CAROUSEL_RECEIPT:-}" == 1 ]]; then
+    printf 'painter: %s\nreferences: %s\nbytes: %s\n' chatgpt "$n" "$bytes"
+  else
   echo "PROMPT (as given):"
   echo "$prompt"
   echo
@@ -383,6 +386,7 @@ painter="OpenAI's current ChatGPT image model, chosen server-side (last confirme
   echo "  image_gen saved_path: ${saved:-<not reported>}"
   if [[ -n "$tin" ]]; then echo "  tokens: input=${tin} output=${tout}"; else echo "  tokens: not in the session record"; fi
   echo "  bytes: ${bytes}"
+  fi
 } > "${stem}.prompt.txt" || exit 5   # bash 3.2 does not stop on a failed redirect of a { } group
 
 echo "chatgpt-image: painted by OpenAI's current image model (C2PA: ${c2pa}); driver=${used}; refs=${n}; size=${dims}" >&2

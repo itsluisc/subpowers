@@ -1,0 +1,520 @@
+#!/usr/bin/env python3
+"""elevenlabs-voice: opt-in ElevenLabs speech, sound effects, and music (paid plan credits).
+
+Supports both official `elevenlabs auth login` (OAuth PKCE in macOS Keychain) and
+`ELEVENLABS_API_KEY` (from environment or user-configured SUBPOWERS_ENV_FILES in
+~/.subpowers/config). Never hardcodes keys or prints secrets.
+
+Usage:
+  elevenlabs-voice status [--json]
+  elevenlabs-voice voices [--search TERM] [--category cloned|professional|premade] [--json]
+  elevenlabs-voice speak "<text>" <out.mp3|out.wav> [--voice NAME_OR_ID] [--model MODEL] [--env ROOM] [--dry-run]
+  elevenlabs-voice sfx "<prompt>" <out.mp3|out.wav> [--duration SEC] [--loop] [--dry-run]
+  elevenlabs-voice music "<prompt>" <out.mp3> [--duration SEC] [--instrumental] [--dry-run]
+
+Exit codes:
+  0 success
+  1 general error
+  2 usage / bad arguments
+  3 not logged in or CLI missing (`elevenlabs auth login` or set ELEVENLABS_API_KEY)
+"""
+from __future__ import annotations
+
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+HOME_DIR = Path(os.environ.get("SUBPOWERS_HOME", str(Path.home() / ".subpowers")))
+HERE = Path(__file__).resolve().parent
+VOICE_ID_RE = re.compile(r"^[A-Za-z0-9]{15,32}$")
+
+
+def say(msg: str) -> None:
+    print(f"subpowers voice: {msg}", file=sys.stderr)
+
+
+def load_config() -> dict[str, str]:
+    cfg: dict[str, str] = {}
+    f = HOME_DIR / "config"
+    if f.is_file():
+        for raw in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip().strip('"').strip("'")
+    return cfg
+
+
+def load_extra_env() -> dict[str, str]:
+    """Load optional user-configured .env files listed in SUBPOWERS_ENV_FILES (never logged)."""
+    out: dict[str, str] = {}
+    cfg = load_config()
+    raw_list = os.environ.get("SUBPOWERS_ENV_FILES") or cfg.get("SUBPOWERS_ENV_FILES", "")
+    for item in raw_list.split(":"):
+        item = item.strip()
+        if not item:
+            continue
+        p = Path(os.path.expanduser(item))
+        if not p.is_file():
+            continue
+        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def cfg_get(key: str, default: str = "") -> str:
+    val = os.environ.get(key)
+    if val is not None and val != "":
+        return val
+    cfg = load_config()
+    if key in cfg and cfg[key] != "":
+        return cfg[key]
+    extra = load_extra_env()
+    if key in extra and extra[key] != "":
+        return extra[key]
+    return default
+
+
+def api_key() -> str:
+    return cfg_get("ELEVENLABS_API_KEY", "").strip()
+
+
+def find_cli() -> str:
+    cli = shutil.which("elevenlabs")
+    if not cli:
+        say("elevenlabs CLI not installed (install: brew install elevenlabs/tap/elevenlabs, then: elevenlabs auth login)")
+        raise SystemExit(3)
+    return cli
+
+
+def run_el(args: list[str], *, attach_key: bool = True, timeout: int = 180) -> subprocess.CompletedProcess[str]:
+    cli = find_cli()
+    full = [cli, *args]
+    key = api_key() if attach_key else ""
+    env = os.environ.copy()
+    if key:
+        env["ELEVENLABS_API_KEY"] = key
+    return subprocess.run(full, env=env, capture_output=True, text=True, timeout=timeout)
+
+
+def check_auth() -> tuple[bool, str, str]:
+    """Returns (ok, auth_mode, detail)."""
+    cli = shutil.which("elevenlabs")
+    if not cli:
+        return False, "none", "elevenlabs CLI not installed"
+    key = api_key()
+    if key:
+        r = run_el(["user", "get", "--format", "json"], attach_key=True, timeout=15)
+        if r.returncode == 0 and r.stdout.strip():
+            try:
+                sub = (json.loads(r.stdout) or {}).get("subscription") or {}
+                used = sub.get("character_count")
+                lim = sub.get("character_limit")
+                tier = sub.get("tier") or "paid"
+                left = (lim - used) if isinstance(used, int) and isinstance(lim, int) else None
+                detail = f"paid tool ({tier}" + (f", {left:,} chars left" if left is not None else "") + ")"
+                return True, "api_key", detail
+            except Exception:
+                return True, "api_key", "paid tool (API key verified)"
+        return False, "api_key", "ELEVENLABS_API_KEY rejected by ElevenLabs"
+    r = subprocess.run([cli, "auth", "status"], capture_output=True, text=True, timeout=15)
+    txt = ((r.stdout or "") + "\n" + (r.stderr or "")).strip()
+    low = txt.lower()
+    if "not logged in" in low or ("missing" in low and "authenticated" not in low):
+        return False, "oauth", "not logged in (run: elevenlabs auth login, or set ELEVENLABS_API_KEY)"
+    if r.returncode != 0 and not txt:
+        return False, "oauth", "auth status check failed"
+    return True, "oauth", "OAuth Keychain logged in"
+
+
+def extract_voices(raw: str) -> list[dict]:
+    if not raw.strip():
+        return []
+    try:
+        data = json.loads(raw)
+    except Exception:
+        return []
+    if isinstance(data, list):
+        return [v for v in data if isinstance(v, dict)]
+    if isinstance(data, dict):
+        for k in ("voices", "items", "data", "results"):
+            if isinstance(data.get(k), list):
+                return [v for v in data[k] if isinstance(v, dict)]
+    return []
+
+
+def list_voices(search: str = "", category: str = "") -> list[dict]:
+    args = ["voices", "search", "--page-size", "100", "--format", "json"]
+    if search:
+        args.extend(["--search", search])
+    if category:
+        args.extend(["--category", category])
+    r = run_el(args, timeout=30)
+    if r.returncode != 0:
+        err = (r.stderr or r.stdout or "").strip()
+        if any(w in err.lower() for w in ("not logged in", "unauthorized", "401", "auth login", "missing")):
+            say("not logged in to ElevenLabs (run: elevenlabs auth login, or set ELEVENLABS_API_KEY)")
+            raise SystemExit(3)
+        say(f"failed to list voices: {err}")
+        raise SystemExit(1)
+    return extract_voices(r.stdout)
+
+
+def resolve_voice(query: str) -> tuple[str, str]:
+    q = (query or "").strip()
+    if not q:
+        q = cfg_get("ELEVENLABS_VOICE", "").strip()
+    if q and VOICE_ID_RE.match(q):
+        return q, q
+
+    voices = list_voices(search=q) if q else list_voices()
+    if not voices and q:
+        voices = list_voices()
+    if not voices:
+        say("no voices found in ElevenLabs account (run: elevenlabs auth login)")
+        raise SystemExit(3)
+
+    if not q:
+        for pref_cat in ("cloned", "professional", "generated", "premade"):
+            for v in voices:
+                if (v.get("category") or "").lower() == pref_cat:
+                    vid = v.get("voice_id") or v.get("id") or ""
+                    if vid:
+                        return vid, str(v.get("name") or vid)
+        first = voices[0]
+        vid = first.get("voice_id") or first.get("id") or ""
+        return vid, str(first.get("name") or vid)
+
+    ql = q.lower()
+    for v in voices:
+        if str(v.get("name") or "").strip().lower() == ql or str(v.get("voice_id") or "").lower() == ql:
+            vid = v.get("voice_id") or v.get("id") or ""
+            return vid, str(v.get("name") or vid)
+    for v in voices:
+        if ql in str(v.get("name") or "").lower():
+            vid = v.get("voice_id") or v.get("id") or ""
+            return vid, str(v.get("name") or vid)
+
+    names = ", ".join(str(v.get("name") or v.get("voice_id")) for v in voices[:8])
+    say(f"no ElevenLabs voice matched '{q}'. Available: {names}")
+    raise SystemExit(2)
+
+
+def pick_format(out_path: Path, explicit: str = "") -> str:
+    if explicit:
+        return explicit
+    ext = out_path.suffix.lower()
+    if ext == ".wav":
+        return "wav_44100"
+    if ext == ".opus":
+        return "opus_48000_128"
+    return "mp3_44100_128"
+
+
+def write_receipt(out_path: Path, prompt: str, meta: dict) -> None:
+    stem = out_path.with_suffix("")
+    rec = Path(f"{stem}.prompt.txt")
+    lines = ["TEXT / PROMPT (as given):", prompt, "", "provenance:"]
+    for k, v in meta.items():
+        if v is not None and v != "":
+            lines.append(f"  {k}: {v}")
+    rec.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def index_library(out_path: Path) -> None:
+    lib = HERE / "library"
+    if lib.is_file():
+        subprocess.run([sys.executable, str(lib), "add", str(out_path)], capture_output=True)
+
+
+def cmd_status(argv: list[str]) -> int:
+    as_json = "--json" in argv
+    ok, mode, detail = check_auth()
+    payload = {"ok": ok, "cli_available": bool(shutil.which("elevenlabs")), "auth_mode": mode, "paid_tool": True}
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"voice  elevenlabs   {'ON' if ok else 'OFF'}  ({detail})")
+    return 0 if ok else 3
+
+
+def cmd_voices(argv: list[str]) -> int:
+    search = ""
+    category = ""
+    as_json = False
+    i = 0
+    while i < len(argv):
+        a = argv[i]
+        if a == "--search" and i + 1 < len(argv):
+            search = argv[i + 1]; i += 2
+        elif a == "--category" and i + 1 < len(argv):
+            category = argv[i + 1]; i += 2
+        elif a == "--json":
+            as_json = True; i += 1
+        else:
+            say(f"unknown arg: {a}"); return 2
+    voices = list_voices(search=search, category=category)
+    clean = [
+        {
+            "voice_id": v.get("voice_id") or v.get("id"),
+            "name": v.get("name"),
+            "category": v.get("category"),
+            "labels": v.get("labels") or {},
+        }
+        for v in voices
+    ]
+    if as_json:
+        print(json.dumps({"ok": True, "count": len(clean), "voices": clean}, indent=2))
+    else:
+        for v in clean:
+            print(f"{v['voice_id']:24s}  {(v['category'] or '-'):12s}  {v['name']}")
+    return 0
+
+
+def cmd_speak(argv: list[str]) -> int:
+    if len(argv) < 2:
+        say('usage: subpowers voice speak "<text>" <out.mp3|out.wav> [--voice NAME_OR_ID] [--model MODEL] [--format FMT] [--env ROOM] [--dry-run]')
+        return 2
+    text, out_path = argv[0], Path(argv[1]).resolve()
+    rest = argv[2:]
+    voice_q = ""
+    model = cfg_get("ELEVENLABS_TTS_MODEL", "")
+    fmt = ""
+    env_id = ""
+    dry = False
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a in ("--voice", "--voice-id") and i + 1 < len(rest):
+            voice_q = rest[i + 1]; i += 2
+        elif a in ("--model", "--model-id") and i + 1 < len(rest):
+            model = rest[i + 1]; i += 2
+        elif a in ("--format", "--output-format") and i + 1 < len(rest):
+            fmt = rest[i + 1]; i += 2
+        elif a == "--env" and i + 1 < len(rest):
+            env_id = rest[i + 1]; i += 2
+        elif a == "--dry-run":
+            dry = True; i += 1
+        else:
+            say(f"unknown arg: {a}"); return 2
+
+    t0 = time.time()
+    out_fmt = pick_format(out_path, fmt)
+    est_chars = len(text)
+    if dry:
+        print(json.dumps({
+            "dry_run": True, "paid_tool": "elevenlabs", "estimated_chars": est_chars,
+            "voice": voice_q or "auto", "output_format": out_fmt, "output_path": str(out_path),
+        }, indent=2))
+        return 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    vid, vname = resolve_voice(voice_q)
+    cmd = [
+        "text-to-speech", "convert",
+        "--text", text,
+        "--voice-id", vid,
+        "--output-format", out_fmt,
+        "-o", str(out_path),
+    ]
+    if model:
+        cmd.extend(["--model-id", model])
+    if env_id:
+        cmd.extend(["--audio-effects.environment-id", env_id])
+    r = run_el(cmd, timeout=180)
+    if r.returncode != 0 or not out_path.is_file() or out_path.stat().st_size == 0:
+        err = (r.stderr or r.stdout or "").strip()
+        if any(w in err.lower() for w in ("not logged in", "unauthorized", "401", "auth login")):
+            say("not logged in to ElevenLabs (run: elevenlabs auth login, or set ELEVENLABS_API_KEY)")
+            return 3
+        say(f"speech generation failed: {err}")
+        return 1
+
+    write_receipt(out_path, text, {
+        "door": "subpowers voice speak (ElevenLabs paid plan tool)",
+        "voice": f"{vname} ({vid})",
+        "model": model or "CLI default",
+        "estimated_chars": est_chars,
+        "output_format": out_fmt,
+        "environment": env_id or None,
+        "bytes": out_path.stat().st_size,
+        "wall_s": round(time.time() - t0, 1),
+    })
+    index_library(out_path)
+    print(str(out_path))
+    return 0
+
+
+def cmd_sfx(argv: list[str]) -> int:
+    if len(argv) < 2:
+        say('usage: subpowers voice sfx "<prompt>" <out.mp3|out.wav> [--duration SEC] [--loop] [--dry-run]')
+        return 2
+    prompt, out_path = argv[0], Path(argv[1]).resolve()
+    rest = argv[2:]
+    dur = ""
+    loop = False
+    model = cfg_get("ELEVENLABS_SFX_MODEL", "")
+    fmt = ""
+    dry = False
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--duration" and i + 1 < len(rest):
+            dur = rest[i + 1]; i += 2
+        elif a == "--loop":
+            loop = True; i += 1
+        elif a == "--model" and i + 1 < len(rest):
+            model = rest[i + 1]; i += 2
+        elif a in ("--format", "--output-format") and i + 1 < len(rest):
+            fmt = rest[i + 1]; i += 2
+        elif a == "--dry-run":
+            dry = True; i += 1
+        else:
+            say(f"unknown arg: {a}"); return 2
+
+    t0 = time.time()
+    out_fmt = pick_format(out_path, fmt)
+    if dry:
+        print(json.dumps({
+            "dry_run": True, "paid_tool": "elevenlabs-sfx", "prompt": prompt,
+            "duration_s": dur or "auto", "loop": loop, "output_path": str(out_path),
+        }, indent=2))
+        return 0
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["text-to-sound-effects", "convert", "--text", prompt, "--output-format", out_fmt, "-o", str(out_path)]
+    if dur:
+        cmd.extend(["--duration-seconds", str(dur)])
+    if loop:
+        cmd.extend(["--loop", "true"])
+    if model:
+        cmd.extend(["--model-id", model])
+    r = run_el(cmd, timeout=180)
+    if r.returncode != 0 or not out_path.is_file() or out_path.stat().st_size == 0:
+        err = (r.stderr or r.stdout or "").strip()
+        if any(w in err.lower() for w in ("not logged in", "unauthorized", "401", "auth login")):
+            say("not logged in to ElevenLabs (run: elevenlabs auth login, or set ELEVENLABS_API_KEY)")
+            return 3
+        say(f"SFX generation failed: {err}")
+        return 1
+
+    write_receipt(out_path, prompt, {
+        "door": "subpowers voice sfx (ElevenLabs paid plan tool)",
+        "model": model or "CLI default",
+        "duration_s": dur or "auto",
+        "loop": loop,
+        "output_format": out_fmt,
+        "bytes": out_path.stat().st_size,
+        "wall_s": round(time.time() - t0, 1),
+    })
+    index_library(out_path)
+    print(str(out_path))
+    return 0
+
+
+def cmd_music(argv: list[str]) -> int:
+    if len(argv) < 2:
+        say('usage: subpowers voice music "<prompt>" <out.mp3> [--duration SEC] [--instrumental] [--dry-run]')
+        return 2
+    prompt, out_path = argv[0], Path(argv[1]).resolve()
+    rest = argv[2:]
+    dur_s = ""
+    instrumental = False
+    model = cfg_get("ELEVENLABS_MUSIC_MODEL", "")
+    dry = False
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--duration" and i + 1 < len(rest):
+            dur_s = rest[i + 1]; i += 2
+        elif a == "--instrumental":
+            instrumental = True; i += 1
+        elif a == "--model" and i + 1 < len(rest):
+            model = rest[i + 1]; i += 2
+        elif a == "--dry-run":
+            dry = True; i += 1
+        else:
+            say(f"unknown arg: {a}"); return 2
+
+    ms = None
+    if dur_s:
+        try:
+            ms = int(float(dur_s) * 1000)
+        except ValueError:
+            say("--duration must be seconds (e.g. 15)")
+            return 2
+        if ms < 3000 or ms > 600000:
+            say("--duration for music must be between 3 and 600 seconds")
+            return 2
+    if dry:
+        print(json.dumps({
+            "dry_run": True, "paid_tool": "elevenlabs-music", "prompt": prompt,
+            "duration_s": dur_s or "auto", "instrumental": instrumental, "output_path": str(out_path),
+        }, indent=2))
+        return 0
+
+    t0 = time.time()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = ["music", "compose", "--prompt", prompt, "-o", str(out_path)]
+    if ms is not None:
+        cmd.extend(["--music-length-ms", str(ms)])
+    if instrumental:
+        cmd.extend(["--force-instrumental", "true"])
+    if model:
+        cmd.extend(["--model-id", model])
+    r = run_el(cmd, timeout=300)
+    if r.returncode != 0 or not out_path.is_file() or out_path.stat().st_size == 0:
+        err = (r.stderr or r.stdout or "").strip()
+        if any(w in err.lower() for w in ("not logged in", "unauthorized", "401", "auth login")):
+            say("not logged in to ElevenLabs (run: elevenlabs auth login, or set ELEVENLABS_API_KEY)")
+            return 3
+        say(f"music generation failed: {err}")
+        return 1
+
+    write_receipt(out_path, prompt, {
+        "door": "subpowers voice music (ElevenLabs paid plan tool)",
+        "model": model or "CLI default",
+        "duration_s": dur_s or "auto",
+        "instrumental": instrumental,
+        "bytes": out_path.stat().st_size,
+        "wall_s": round(time.time() - t0, 1),
+    })
+    index_library(out_path)
+    print(str(out_path))
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 0 if argv else 2
+    sub = argv[0]
+    rest = argv[1:]
+    if sub == "status":
+        return cmd_status(rest)
+    if sub in ("voices", "list"):
+        return cmd_voices(rest)
+    if sub in ("speak", "tts", "say"):
+        return cmd_speak(rest)
+    if sub in ("sfx", "sound", "fx"):
+        return cmd_sfx(rest)
+    if sub == "music":
+        return cmd_music(rest)
+    if len(argv) >= 2 and not argv[0].startswith("-") and not argv[1].startswith("-"):
+        return cmd_speak(argv)
+    say(f"unknown voice subcommand '{sub}' (use status, voices, speak, sfx, or music)")
+    return 2
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

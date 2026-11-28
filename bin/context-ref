@@ -1,0 +1,726 @@
+#!/usr/bin/env python3
+"""context-ref: fetch structured context and reference images from any public URL or creator.
+
+Works out of the box (no keys) for X/Twitter posts, YouTube videos, and webpages.
+Also supports opt-in paid creator tools when configured via environment or
+SUBPOWERS_ENV_FILES in ~/.subpowers/config:
+  - TokScript (TOKSCRIPT_API_KEY): IG/TikTok/YouTube creator posts, carousels, reels, transcripts
+  - Poppy AI (POPPY_MCP_KEY or POPPY_API_KEY): IG post transcripts, on-screen text, hooks, CTAs, creator posts
+
+Security:
+  - Allows only http:// and https:// URLs.
+  - Resolves target hostnames and rejects loopback, RFC1918 private, link-local, multicast,
+    and reserved IPs (SSRF protection) on both initial requests and redirects.
+  - Enforces strict size and timeout caps on all HTTP fetches.
+
+Usage:
+  context-ref status [--json]
+  context-ref <URL|@handle> [--source auto|public|tokscript|poppy] [--out-dir DIR] [--max-images N] [--no-images] [--json]
+"""
+from __future__ import annotations
+
+import hashlib
+import http.client
+import html
+import io
+import ipaddress
+import json
+import os
+import re
+import socket
+import sys
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+from typing import Any
+
+HOME_DIR = Path(os.environ.get("SUBPOWERS_HOME", str(Path.home() / ".subpowers")))
+CACHE_ROOT = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "subpowers" / "url-context"
+USER_AGENT = "subpowers/0.6 (+https://github.com/itsluisc/subpowers)"
+MAX_HTML_BYTES = 512 * 1024
+MAX_IMG_BYTES = 12 * 1024 * 1024
+X_POST_RE = re.compile(r"^https?://(?:www\.|mobile\.)?(?:x\.com|twitter\.com)/([A-Za-z0-9_]+)/status/(\d+)", re.I)
+YT_RE = re.compile(r"^https?://(?:www\.|m\.)?(?:youtube\.com/(?:watch\?v=|shorts/|live/)|youtu\.be/)([A-Za-z0-9_-]{6,})", re.I)
+IG_RE = re.compile(r"^https?://(?:www\.|m\.)?instagram\.com/(?:p|reel|tv)/([A-Za-z0-9_-]+)", re.I)
+TT_RE = re.compile(r"^https?://(?:www\.|vm\.|m\.)?tiktok\.com/", re.I)
+HANDLE_RE = re.compile(r"^@([A-Za-z0-9._]{2,60})$")
+
+
+def redact_links(text):
+    # Signatures can live in the path as well as the query. Do not keep either.
+    return re.sub(r"(?i)https?://[^\s]+", "[link omitted]", text)
+
+
+def decoded_image(source, expected_format):
+    """Require decoded pixel data, not just dimensions or a recognized header."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    try:
+        with Image.open(source) as image:
+            if image.format != expected_format or min(image.size) < 1:
+                return False
+            image.load()
+            return True
+    except (OSError, ValueError, SyntaxError, Image.DecompressionBombError):
+        return False
+
+
+def say(msg: str) -> None:
+    print(f"subpowers context: {msg}", file=sys.stderr)
+
+
+def load_config() -> dict[str, str]:
+    cfg: dict[str, str] = {}
+    f = HOME_DIR / "config"
+    if f.is_file():
+        for raw in f.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            cfg[k.strip()] = v.strip().strip('"').strip("'")
+    return cfg
+
+
+def load_extra_env() -> dict[str, str]:
+    out: dict[str, str] = {}
+    cfg = load_config()
+    raw_list = os.environ.get("SUBPOWERS_ENV_FILES") or cfg.get("SUBPOWERS_ENV_FILES", "")
+    for item in raw_list.split(":"):
+        item = item.strip()
+        if not item:
+            continue
+        p = Path(os.path.expanduser(item))
+        if not p.is_file():
+            continue
+        for raw in p.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            k, v = line.split("=", 1)
+            out[k.strip()] = v.strip().strip('"').strip("'")
+    return out
+
+
+def env_get(key: str, default: str = "") -> str:
+    val = os.environ.get(key)
+    if val is not None and val != "":
+        return val
+    cfg = load_config()
+    if key in cfg and cfg[key] != "":
+        return cfg[key]
+    extra = load_extra_env()
+    if key in extra and extra[key] != "":
+        return extra[key]
+    return default
+
+
+def validate_public_url(url: str) -> str:
+    parsed = urllib.parse.urlparse(url.strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        raise ValueError(f"unsupported URL (expected http:// or https://): {url}")
+    host = parsed.hostname.lower()
+    if host in ("localhost", "localhost.localdomain") or host.endswith(".local"):
+        raise ValueError(f"refused local hostname: {host}")
+    if os.environ.get("SUBPOWERS_CONTEXT_ALLOW_LOCAL") != "1":
+        checked_addresses(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    return url.strip()
+
+
+def checked_addresses(host, port):
+    try:
+        infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        raise ValueError(f"could not resolve host '{host}'") from exc
+    if not infos:
+        raise ValueError(f"no DNS records for host '{host}'")
+    for family, _, _, _, addr in infos:
+        ip = ipaddress.ip_address(addr[0])
+        # Offline fixtures may opt in to a literal loopback, never a hostname.
+        if os.environ.get("SUBPOWERS_CONTEXT_ALLOW_LOCAL") == "1" and ip.is_loopback and host == str(ip):
+            continue
+        if (family not in (socket.AF_INET, socket.AF_INET6) or not ip.is_global or
+                ip.is_multicast or ip.is_reserved or (ip.version == 6 and
+                (ip.is_site_local or ip.ipv4_mapped or ip.sixtofour or ip.teredo))):
+            raise ValueError(f"refused non-public IP for host '{host}'")
+    return infos
+
+
+def checked_connect(address, timeout, source_address=None):
+    # Pass the vetted numeric sockaddr directly to connect. Keep the original
+    # hostname on HTTPConnection for the Host header, TLS SNI and certificate.
+    last_error = None
+    for family, kind, proto, _, addr in checked_addresses(*address):
+        sock = socket.socket(family, kind, proto)
+        try:
+            sock.settimeout(timeout)
+            if source_address:
+                sock.bind(source_address)
+            sock.connect(addr)
+            return sock
+        except OSError as exc:
+            last_error = exc
+            sock.close()
+    raise last_error
+
+
+class CheckedConnection:
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = checked_connect
+
+
+class PublicHTTPConnection(CheckedConnection, http.client.HTTPConnection):
+    pass
+
+
+class PublicHTTPSConnection(CheckedConnection, http.client.HTTPSConnection):
+    pass
+
+
+class PublicHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(PublicHTTPConnection, req)
+
+
+class PublicHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(PublicHTTPSConnection, req, context=self._context)
+
+
+def public_opener(redirect):
+    # A proxy could resolve a different destination; connect directly instead.
+    return urllib.request.build_opener(redirect, urllib.request.ProxyHandler({}),
+                                       PublicHTTPHandler(), PublicHTTPSHandler())
+
+
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        resolved = urllib.parse.urljoin(req.full_url, newurl)
+        validate_public_url(resolved)
+        return super().redirect_request(req, fp, code, msg, headers, resolved)
+
+
+def http_get(url: str, *, max_bytes: int = MAX_HTML_BYTES, timeout: float = 12.0, accept: str = "*/*") -> tuple[bytes, str, str]:
+    safe_url = validate_public_url(url)
+    opener = public_opener(SafeRedirectHandler())
+    req = urllib.request.Request(safe_url, headers={"User-Agent": USER_AGENT, "Accept": accept})
+    with opener.open(req, timeout=timeout) as resp:
+        final_url = resp.geturl()
+        ctype = (resp.headers.get("Content-Type") or "").lower()
+        data = resp.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            data = data[:max_bytes]
+        return data, ctype, final_url
+
+
+class NoAuthRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise ValueError("refused authenticated redirect")
+
+
+def mcp_http_call(endpoint: str, tool_name: str, arguments: dict[str, Any], headers: dict[str, str], timeout: float = 20.0) -> Any:
+    """Call a remote Streamable-HTTP MCP server tool cleanly via JSON-RPC 2.0 (stdlib only)."""
+    if urllib.parse.urlsplit(endpoint).scheme != "https":
+        raise ValueError("authenticated requests require HTTPS")
+    safe_url = validate_public_url(endpoint)
+    body = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": tool_name, "arguments": arguments},
+    }).encode("utf-8")
+    req_headers = {
+        "User-Agent": USER_AGENT,
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        **headers,
+    }
+    req = urllib.request.Request(safe_url, data=body, headers=req_headers, method="POST")
+    with public_opener(NoAuthRedirect()).open(req, timeout=timeout) as resp:
+        raw = resp.read(2 * 1024 * 1024).decode("utf-8", errors="replace")
+    # Handle either direct JSON or SSE `event: message\ndata: {...}` frames (including embedded raw newlines)
+    msg = None
+    stripped = raw.lstrip()
+    if stripped.startswith("{"):
+        msg = json.loads(stripped, strict=False)
+    else:
+        for block in re.split(r"\r?\n\r?\n", raw):
+            idx = block.find("data:")
+            if idx == -1:
+                continue
+            chunk = block[idx + 5:].strip()
+            if chunk.startswith("{"):
+                try:
+                    cand = json.loads(chunk, strict=False)
+                    if "result" in cand or "error" in cand:
+                        msg = cand
+                except Exception:
+                    pass
+    if not isinstance(msg, dict):
+        raise RuntimeError("unexpected MCP HTTP response")
+    if "error" in msg:
+        raise RuntimeError(str(msg["error"]))
+    res = msg.get("result") or {}
+    if res.get("isError"):
+        raise RuntimeError(str(res.get("content") or "MCP tool error"))
+    content = res.get("content") or []
+    texts = [c.get("text", "") for c in content if isinstance(c, dict) and c.get("type") == "text"]
+    joined = "\n".join(t for t in texts if t).strip()
+    if joined.startswith(("{", "[")):
+        try:
+            return json.loads(joined, strict=False)
+        except Exception:
+            pass
+    return joined or res
+
+
+def collect_image_urls(obj: Any, found: list[str] | None = None) -> list[str]:
+    if found is None:
+        found = []
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if isinstance(v, str) and v.startswith(("http://", "https://")):
+                if any(w in kl for w in ("image", "thumbnail", "cover", "slide", "display_url", "media_url", "pic")):
+                    if v not in found:
+                        found.append(v)
+            else:
+                collect_image_urls(v, found)
+    elif isinstance(obj, list):
+        for item in obj[:12]:
+            collect_image_urls(item, found)
+    return found
+
+
+def clean_text(raw: str, limit: int = 900) -> str:
+    txt = html.unescape(re.sub(r"\s+", " ", raw or "")).strip()
+    if len(txt) > limit:
+        return txt[:limit].rstrip() + "..."
+    return txt
+
+
+def download_image(img_url: str, out_dir: Path, idx: int) -> str | None:
+    try:
+        data, ctype, _ = http_get(img_url, max_bytes=MAX_IMG_BYTES, timeout=15.0, accept="image/*,*/*")
+    except Exception:
+        return None
+    if not data or len(data) < 256:
+        return None
+    ext = ".jpg"
+    if data[:8] == b"\x89PNG\r\n\x1a\n" or "png" in ctype:
+        ext = ".png"
+    elif (data[:4] == b"RIFF" and data[8:12] == b"WEBP") or "webp" in ctype:
+        ext = ".webp"
+    elif data[:3] == b"\xff\xd8\xff" or "jpeg" in ctype or "jpg" in ctype:
+        ext = ".jpg"
+    else:
+        return None
+    if not decoded_image(io.BytesIO(data), {".jpg":"JPEG", ".png":"PNG", ".webp":"WEBP"}[ext]):
+        return None
+    out_dir.mkdir(parents=True, exist_ok=True)
+    dest = out_dir / f"ref_{idx}{ext}"
+    dest.write_bytes(data)
+    return str(dest)
+
+
+def fetch_tokscript(target: str) -> dict[str, Any]:
+    key = env_get("TOKSCRIPT_API_KEY", "").strip()
+    if not key:
+        raise RuntimeError("TOKSCRIPT_API_KEY not configured (paid tool; set env var or SUBPOWERS_ENV_FILES)")
+    endpoint = env_get("SUBPOWERS_TOKSCRIPT_MCP_URL", "https://api.tokscript.com/mcp")
+    hdrs = {"Authorization": f"Bearer {key}"}
+    hm = HANDLE_RE.match(target.strip())
+    if hm:
+        uname = hm.group(1)
+        data = mcp_http_call(endpoint, "get_instagram_user_posts", {"username": uname, "count": 8}, hdrs)
+        posts = data.get("posts") or data.get("items") or (data if isinstance(data, list) else [])
+        snippets = []
+        for p in posts[:5]:
+            if isinstance(p, dict):
+                cap = clean_text(str(p.get("caption") or p.get("title") or ""), 160)
+                ptype = p.get("type") or "post"
+                views = p.get("views") or p.get("likes") or ""
+                snippets.append(f"[{ptype} {views}] {cap}".strip())
+        return {
+            "kind": "tokscript_creator",
+            "paid_tool": "tokscript",
+            "source_url": f"https://www.instagram.com/{uname}/",
+            "domain": "instagram.com",
+            "author": f"@{uname}",
+            "title": f"TokScript posts for @{uname}",
+            "summary": clean_text(" | ".join(snippets), 950),
+            "image_urls": collect_image_urls(posts[:5]),
+        }
+    if IG_RE.match(target):
+        tool = "get_instagram_transcript"
+        args = {"video_url": target}
+    elif TT_RE.match(target):
+        tool = "get_tiktok_transcript"
+        args = {"video_url": target}
+    elif YT_RE.match(target):
+        tool = "get_youtube_transcript"
+        args = {"video_url": target}
+    else:
+        raise RuntimeError("TokScript supports Instagram, TikTok, YouTube URLs, or @creator handles")
+    data = mcp_http_call(endpoint, tool, args, hdrs)
+    if isinstance(data, dict):
+        title = clean_text(str(data.get("title") or data.get("caption") or f"TokScript {tool}"), 260)
+        author = clean_text(str(data.get("author") or data.get("username") or data.get("channel") or ""), 120)
+        transcript = clean_text(str(data.get("transcript") or data.get("text") or data.get("caption") or ""), 900)
+        imgs = collect_image_urls(data)
+    else:
+        title = f"TokScript reference ({target})"
+        author = ""
+        transcript = clean_text(str(data), 900)
+        imgs = []
+    return {
+        "kind": "tokscript_post",
+        "paid_tool": "tokscript",
+        "source_url": target,
+        "domain": urllib.parse.urlparse(target).hostname or "tokscript",
+        "author": author,
+        "title": title,
+        "summary": transcript,
+        "image_urls": imgs,
+    }
+
+
+def fetch_poppy(target: str) -> dict[str, Any]:
+    key = env_get("POPPY_MCP_KEY") or env_get("POPPY_API_KEY")
+    if not key:
+        raise RuntimeError("POPPY_MCP_KEY / POPPY_API_KEY not configured (paid tool; or use the Poppy AI MCP directly in your agent)")
+    endpoint = env_get("SUBPOWERS_POPPY_MCP_URL", "https://api.getpoppy.ai/api/mcp")
+    hdrs = {"Authorization": f"Bearer {key.strip()}"}
+    hm = HANDLE_RE.match(target.strip())
+    if hm:
+        uname = hm.group(1)
+        data = mcp_http_call(endpoint, "get_creator_posts", {"platform": "instagram", "profile": f"@{uname}", "sort": "outliers", "limit": 16}, hdrs, timeout=45.0)
+        posts = data.get("posts") or data.get("items") or (data if isinstance(data, list) else [])
+        bits = []
+        for p in posts[:5]:
+            if isinstance(p, dict):
+                hook = p.get("hook") or p.get("title") or p.get("summary") or p.get("caption") or ""
+                bits.append(clean_text(str(hook), 180))
+        return {
+            "kind": "poppy_creator",
+            "paid_tool": "poppy",
+            "source_url": f"https://www.instagram.com/{uname}/",
+            "domain": "poppy.ai",
+            "author": f"@{uname}",
+            "title": f"Poppy AI creator library for @{uname}",
+            "summary": clean_text(" | ".join(b for b in bits if b), 950),
+            "image_urls": collect_image_urls(posts[:5]),
+        }
+    data = mcp_http_call(endpoint, "get_post", {"post": target}, hdrs)
+    if isinstance(data, dict) and data.get("found") is False:
+        raise RuntimeError(data.get("reason") or "post not in Poppy library")
+    post = data.get("post") if (isinstance(data, dict) and isinstance(data.get("post"), dict)) else data
+    if isinstance(post, dict):
+        hook_val = post.get("hook")
+        hook = clean_text(str(hook_val.get("text") if isinstance(hook_val, dict) else (hook_val or "")), 220)
+        cta_val = post.get("cta")
+        cta = clean_text(str(cta_val.get("text") if isinstance(cta_val, dict) else (cta_val or "")), 160)
+        on_screen = clean_text(str(post.get("on_screen_text") or ""), 280)
+        vis_sum = clean_text(str(post.get("visual_summary") or ""), 320)
+        transcript = clean_text(str(post.get("summary") or post.get("caption") or post.get("transcript") or ""), 500)
+        parts = [f"Hook: {hook}" if hook else "", f"Visual style: {vis_sum}" if vis_sum else "", f"On-screen: {on_screen}" if on_screen else "", transcript, f"CTA: {cta}" if cta else ""]
+        summary = clean_text(" | ".join(p for p in parts if p), 1000)
+        creator = post.get("creator") if isinstance(post.get("creator"), dict) else {}
+        handle = creator.get("handle") or post.get("username") or post.get("author") or ""
+        cname = creator.get("name") or ""
+        author = f"{cname} (@{handle})".strip() if (cname and handle) else (f"@{handle}" if handle and not str(handle).startswith("@") else str(handle))
+        title = clean_text(str(post.get("title") or hook or f"Poppy AI post by {author or 'creator'}"), 240)
+        imgs = collect_image_urls(post)
+    else:
+        title = "Poppy AI post"
+        author = ""
+        summary = clean_text(str(data), 950)
+        imgs = []
+    return {
+        "kind": "poppy_post",
+        "paid_tool": "poppy",
+        "source_url": target,
+        "domain": urllib.parse.urlparse(target).hostname or "poppy.ai",
+        "author": author,
+        "title": title,
+        "summary": summary,
+        "image_urls": imgs,
+    }
+
+
+def fetch_x_post(url: str, user: str, tweet_id: str) -> dict[str, Any]:
+    api_base = os.environ.get("SUBPOWERS_FXTWITTER_BASE", "https://api.fxtwitter.com").rstrip("/")
+    try:
+        raw, _, _ = http_get(f"{api_base}/{user}/status/{tweet_id}", accept="application/json")
+        payload = json.loads(raw.decode("utf-8", errors="replace"))
+        tw = payload.get("tweet") or {}
+        author_obj = tw.get("author") or {}
+        handle = author_obj.get("screen_name") or user
+        name = author_obj.get("name") or handle
+        text = clean_text(tw.get("text") or "", 900)
+        quote = tw.get("quote") or {}
+        if quote.get("text"):
+            q_author = (quote.get("author") or {}).get("screen_name") or ""
+            text = clean_text(f"{text} [Quoted @{q_author}: {quote.get('text')}]", 1000)
+        imgs: list[str] = []
+        media = tw.get("media") or {}
+        for ph in media.get("photos") or []:
+            if isinstance(ph, dict) and ph.get("url"):
+                imgs.append(ph["url"])
+        for vd in media.get("videos") or []:
+            if isinstance(vd, dict) and vd.get("thumbnail_url"):
+                imgs.append(vd["thumbnail_url"])
+        if not imgs and author_obj.get("avatar_url"):
+            imgs.append(author_obj["avatar_url"])
+        return {
+            "kind": "x_post",
+            "source_url": url,
+            "domain": "x.com",
+            "author": f"{name} (@{handle})",
+            "title": f"X post by @{handle}",
+            "summary": text,
+            "image_urls": imgs,
+        }
+    except Exception:
+        pass
+
+    oe_url = "https://publish.twitter.com/oembed?url=" + urllib.parse.quote(url, safe="")
+    raw, _, _ = http_get(oe_url, accept="application/json")
+    oe = json.loads(raw.decode("utf-8", errors="replace"))
+    stripped = re.sub(r"<[^>]+>", " ", oe.get("html") or "")
+    return {
+        "kind": "x_post",
+        "source_url": url,
+        "domain": "x.com",
+        "author": oe.get("author_name") or f"@{user}",
+        "title": f"X post by {oe.get('author_name') or '@' + user}",
+        "summary": clean_text(stripped, 900),
+        "image_urls": [],
+    }
+
+
+def fetch_youtube(url: str, video_id: str) -> dict[str, Any]:
+    oe_base = os.environ.get("SUBPOWERS_YT_OEMBED_BASE", "https://www.youtube.com/oembed")
+    oe_url = f"{oe_base}?url={urllib.parse.quote(url, safe='')}&format=json"
+    title = ""
+    author = ""
+    imgs: list[str] = []
+    try:
+        raw, _, _ = http_get(oe_url, accept="application/json")
+        oe = json.loads(raw.decode("utf-8", errors="replace"))
+        title = clean_text(oe.get("title") or "", 300)
+        author = clean_text(oe.get("author_name") or "", 120)
+        if oe.get("thumbnail_url"):
+            imgs.append(oe["thumbnail_url"])
+    except Exception:
+        pass
+    if not imgs:
+        imgs.append(f"https://i.ytimg.com/vi/{video_id}/hqdefault.jpg")
+    summary = title
+    return {
+        "kind": "youtube_video",
+        "source_url": url,
+        "domain": "youtube.com",
+        "author": author,
+        "title": title or f"YouTube video {video_id}",
+        "summary": summary or title,
+        "image_urls": imgs,
+    }
+
+
+def fetch_social_video_or_page(url: str) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    domain = (parsed.hostname or "").lower()
+    raw, _, final_url = http_get(url, accept="text/html,application/xhtml+xml,*/*")
+    text_html = raw.decode("utf-8", errors="replace")
+
+    def meta_val(prop: str, limit: int = 400) -> str:
+        m = re.search(
+            rf'<meta[^>]+(?:property|name)=["\']{re.escape(prop)}["\'][^>]+content=["\']([^"\']+)["\']',
+            text_html, re.I,
+        )
+        if not m:
+            m = re.search(
+                rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+(?:property|name)=["\']{re.escape(prop)}["\']',
+                text_html, re.I,
+            )
+        return clean_text(m.group(1), limit) if m else ""
+
+    t_match = re.search(r"<title[^>]*>(.*?)</title>", text_html, re.I | re.S)
+    title = meta_val("og:title") or meta_val("twitter:title") or (clean_text(t_match.group(1), 250) if t_match else domain)
+    desc = meta_val("og:description") or meta_val("description") or meta_val("twitter:description")
+    author = meta_val("author") or meta_val("og:site_name") or domain
+    imgs: list[str] = []
+    for k in ("og:image", "twitter:image"):
+        iv = meta_val(k, limit=2048)
+        if iv:
+            abs_iv = urllib.parse.urljoin(final_url, iv)
+            if abs_iv not in imgs:
+                imgs.append(abs_iv)
+
+    body_clean = re.sub(r"<(script|style|noscript|svg)[^>]*>.*?</\1>", " ", text_html, flags=re.I | re.S)
+    body_clean = clean_text(re.sub(r"<[^>]+>", " ", body_clean), 700)
+    summary = desc if len(desc) >= 60 else clean_text(f"{desc} {body_clean}".strip(), 800)
+    return {
+        "kind": "webpage",
+        "source_url": final_url,
+        "domain": domain,
+        "author": author,
+        "title": title,
+        "summary": summary,
+        "image_urls": imgs,
+    }
+
+
+def build_prompt_note(ctx: dict[str, Any]) -> str:
+    bits = []
+    if ctx.get("title"):
+        bits.append(ctx["title"])
+    if ctx.get("author") and ctx["author"] not in (ctx.get("title") or ""):
+        bits.append(f"by {ctx['author']}")
+    head = " ".join(bits) if bits else ctx.get("domain", "reference URL")
+    body = ctx.get("summary") or ""
+    if body and body != ctx.get("title"):
+        return f"Reference context from {ctx.get('domain', 'web')} ({head}): {body}"
+    return f"Reference context from {ctx.get('domain', 'web')}: {head}"
+
+
+def fetch_context(
+    target: str,
+    *,
+    source: str = "auto",
+    out_dir: Path | None = None,
+    max_images: int = 3,
+    download_images: bool = True,
+) -> dict[str, Any]:
+    target = target.strip()
+    is_handle = bool(HANDLE_RE.match(target))
+    if not is_handle:
+        target = validate_public_url(target)
+    key = hashlib.sha256(f"{source}:{target}".encode("utf-8")).hexdigest()[:16]
+    dest_dir = out_dir or (CACHE_ROOT / key)
+
+    ctx: dict[str, Any] | None = None
+    if source == "tokscript":
+        ctx = fetch_tokscript(target)
+    elif source == "poppy":
+        ctx = fetch_poppy(target)
+    elif is_handle:
+        raise ValueError("Use a public post URL or explicitly select --source poppy or --source tokscript for a handle.")
+
+    if ctx is None:
+        xm = X_POST_RE.match(target)
+        ym = YT_RE.match(target)
+        if xm:
+            ctx = fetch_x_post(target, xm.group(1), xm.group(2))
+        elif ym:
+            ctx = fetch_youtube(target, ym.group(1))
+        else:
+            ctx = fetch_social_video_or_page(target)
+
+    local_imgs: list[str] = []
+    if download_images and max_images > 0:
+        for idx, iu in enumerate(ctx.get("image_urls") or [], 1):
+            if len(local_imgs) >= max_images:
+                break
+            saved = download_image(iu, dest_dir, idx)
+            if saved:
+                local_imgs.append(saved)
+
+    # Publish only display text and locally chosen filenames, never source/media URLs
+    # or newly introduced provider fields. Free-form titles and summaries can embed links too.
+    ctx = {k: redact_links(v)
+           for k in ("kind", "paid_tool", "domain", "author", "title", "summary")
+           if isinstance((v := ctx.get(k)), str)}
+    ctx["ref_images"] = local_imgs
+    ctx["prompt_context"] = build_prompt_note(ctx)
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "context.json").write_text(json.dumps({**ctx, "ref_images": [Path(p).name for p in local_imgs]}, indent=2), encoding="utf-8")
+    return ctx
+
+
+def cmd_status(argv: list[str]) -> int:
+    as_json = "--json" in argv
+    has_ts = bool(env_get("TOKSCRIPT_API_KEY").strip())
+    has_poppy = bool((env_get("POPPY_MCP_KEY") or env_get("POPPY_API_KEY")).strip())
+    payload = {
+        "public_url": True,
+        "yt_dlp": None,
+        "downloader_policy": "External downloader disabled: its requests cannot be destination-checked.",
+        "paid_tools": {
+            "tokscript": {"configured": has_ts, "env": "TOKSCRIPT_API_KEY"},
+            "poppy": {"configured": has_poppy, "env": "POPPY_MCP_KEY or POPPY_API_KEY"},
+        },
+    }
+    if as_json:
+        print(json.dumps(payload, indent=2))
+    else:
+        print(payload["downloader_policy"])
+        print("context public      ON   (X posts, YouTube, webpages, zero API keys)")
+        print(f"paid    tokscript   {'ON' if has_ts else 'OFF'}  (opt-in paid tool: IG/TikTok/YT creator posts & transcripts)")
+        print(f"paid    poppy       {'ON' if has_poppy else 'OFF'}  (opt-in paid tool: creator library, hooks, carousels, boards)")
+    return 0
+
+
+def main(argv: list[str]) -> int:
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 0 if argv else 2
+    if argv[0] == "status":
+        return cmd_status(argv[1:])
+    target = argv[0]
+    rest = argv[1:]
+    source = "auto"
+    out_dir = None
+    max_images = 3
+    dl_images = True
+    as_json = False
+    i = 0
+    while i < len(rest):
+        a = rest[i]
+        if a == "--source" and i + 1 < len(rest):
+            source = rest[i + 1]; i += 2
+        elif a == "--out-dir" and i + 1 < len(rest):
+            out_dir = Path(rest[i + 1]).resolve(); i += 2
+        elif a == "--max-images" and i + 1 < len(rest):
+            try:
+                max_images = max(0, int(rest[i + 1]))
+            except ValueError:
+                say("--max-images must be an integer"); return 2
+            i += 2
+        elif a == "--no-images":
+            dl_images = False; i += 1
+        elif a == "--json":
+            as_json = True; i += 1
+        else:
+            say(f"unknown arg: {a}"); return 2
+    if source not in ("auto", "public", "tokscript", "poppy"):
+        say("--source must be auto, public, tokscript, or poppy")
+        return 2
+
+    try:
+        ctx = fetch_context(target, source=source, out_dir=out_dir, max_images=max_images, download_images=dl_images)
+    except ValueError as exc:
+        say(str(exc))
+        return 2
+    except Exception as exc:
+        say(f"failed to fetch context: {exc}")
+        return 1
+
+    if as_json:
+        print(json.dumps(ctx, indent=2))
+    else:
+        print(ctx["prompt_context"])
+        for img in ctx["ref_images"]:
+            print(f"ref_image: {img}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

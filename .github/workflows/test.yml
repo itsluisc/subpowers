@@ -17,15 +17,23 @@ jobs:
           - { os: macos-latest, pillow: false }
     steps:
       - uses: actions/checkout@v7
-      # System-wide, not --user: tests/run.sh gives every command a temporary HOME.
-      - name: Install Pillow
-        if: matrix.pillow
-        run: sudo apt-get update && sudo apt-get install -y python3-pil
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Configure decoder for Python and shell tests
+        run: |
+          if [ "${{ matrix.pillow }}" = "true" ]; then
+            python3 -m pip install Pillow
+          else
+            python3 -m pip uninstall -y Pillow
+          fi
       - name: bash -n every shell script
         run: |
           for f in bin/* tests/run.sh install.sh; do
             if head -n 1 "$f" | grep -q bash; then /bin/bash -n "$f" || exit 1; echo "ok  $f"; fi
           done
+      - name: Offline Python contracts
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: tests/run.sh, sips hidden
         run: /bin/bash tests/run.sh
         env:

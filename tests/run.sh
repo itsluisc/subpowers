@@ -190,6 +190,21 @@ check "receipt" test -f "$C/out/beach.prompt.txt"
 check "one paint" paints 1 grok
 check "image_edit got the reference" called '"grok-paint"' '"tool": "image_edit", "aspect": "4:3", "images": 1'
 
+newcase "reference cache: equal basenames retain distinct pixels"
+mkdir -p "$C/a" "$C/b"
+for folder in a b; do
+  python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import fakeimg; fakeimg.png(sys.argv[2], 64, 64, (255,0,0) if sys.argv[3]=="a" else (0,0,255))' "$stubs" "$C/$folder/ref.png" "$folder"
+done
+run bash "$bin/subpowers" image "two references" "$C/out/cache.png" --ref "$C/a/ref.png" --ref "$C/b/ref.png"
+check "paint succeeds" exits 0
+if pillow; then
+  check "two cache entries with distinct pixels" python3 -c 'from PIL import Image; from pathlib import Path; import sys
+pixels = {Image.open(p).getpixel((0, 0)) for p in Path(sys.argv[1]).rglob("ref.jpg")}
+sys.exit(len(pixels) != 2)' "$C/home"
+else
+  check "no JPEG cache without decoder" test -z "$(find "$C/home" -path '*/refs-small/*' -type f)"
+fi
+
 newcase "front door: auto paints once"
 run bash "$bin/subpowers" image "a red mug" "$C/out/mug.png"
 check "exit 0" exits 0
@@ -378,11 +393,12 @@ check "says it timed out" has "$C/stderr" "timed out"
 check "within 12 s (took ${took}s)" test "$took" -lt 12
 
 echo "== CLIs that keep talking after the answer (SIGPIPE under pipefail)"
-newcase "powers: every logged-in plan is ON"
+newcase "powers: report installed CLIs without account probes"
 run STUB_CHATTY=1 bash "$bin/subpowers" powers
-check "chatgpt ON" has "$C/stdout" "chatgpt +ON"
-check "antigravity ON" has "$C/stdout" "antigravity +ON"
-check "grok ON" has "$C/stdout" "grok +ON"
+check "chatgpt installed" has "$C/stdout" "chatgpt +installed"
+check "antigravity installed" has "$C/stdout" "antigravity +installed"
+check "grok installed" has "$C/stdout" "grok +installed"
+check "no provider calls" test ! -s "$C/stub.log"
 newcase "chatgpt: paints, isolated with --ignore-user-config"
 run STUB_CHATTY=1 bash "$bin/chatgpt-image" "a red mug" "$C/out/mug.png"
 check "exit 0" exits 0
@@ -686,7 +702,7 @@ check "one higgsfield paint" paints 1 higgsfield
 newcase "powers lists higgsfield as opt-in"
 run bash "$bin/subpowers" powers
 check "exit 0" exits 0
-check "opt-in line" has "$C/stdout" "higgsfield +ON +\\(opt-in"
+check "opt-in line" has "$C/stdout" "higgsfield +installed +\\(opt-in"
 
 echo
 echo "$pass passed, $fail failed"

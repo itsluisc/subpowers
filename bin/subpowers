@@ -2,13 +2,18 @@
 # subpowers: the AI subscriptions you already pay for, as powers for every agent.
 #
 # Usage:
-#   subpowers image "<prompt>" out.png [--painter P|council] [--with-higgsfield] [--size WxH] [--ref IMG]... [--refs NAME] [--soul-id ID] [--cinematic]
+#   subpowers image "<prompt>" out.png [--painter P|council] [--with-higgsfield] [--size WxH] [--ref IMG]... [--refs NAME] [--from-url URL] [--context-file FILE] [--soul-id ID] [--cinematic]
 #   subpowers avatar|sheet NAME|--from IMG out.png [--painter P|council] [--style photoreal|3d-toon]
 #                                                       dark neutral gray (#3A3A3C) character turnaround sheet
 #   subpowers soul list | get NAME_OR_UUID | create NAME IMG1..IMG5 [--cinematic] [--wait]
 #                                                       manage or train Higgsfield Soul 2.0 / Soul Cinematic character IDs
-#   subpowers intone out.mp4 --character IMG --location IMG --audio VOICE.wav [--prompt "..."] [--aspect 9:16] [--resolution 1080p]
-#                                                       Higgsfield Intone: character + real room + audio (2-30s) -> 1080p talking video
+#   subpowers intone out.mp4 --character IMG --location IMG (--audio VOICE.wav | --speak "TEXT" [--voice NAME]) [--prompt "..."] [--aspect 9:16]
+#                                                       Higgsfield Intone: character + real room + voice (2-30s) -> 1080p talking video
+#   subpowers voice status|voices|speak|sfx|music ...   opt-in paid tool (ElevenLabs CLI): speech, sound effects, music beds
+#   subpowers context status|<URL|@handle> [--source auto|public|tokscript|poppy] [--json]
+#                                                       extract X/YouTube/IG/TikTok/webpage context & ref images (public + opt-in TokScript/Poppy)
+#   subpowers carousel slides.txt|--topic T OUTDIR [--style-ref IMG|--style-url URL|--creator @h] [--test-cover]
+#                                                       style-referenced, cover-anchored Instagram/LinkedIn carousel deck
 #   subpowers storyboard shots.txt OUTDIR [--refs NAME] [--painter P] [--size WxH] [--style "..."]
 #   subpowers refs add NAME IMG...  |  refs list [NAME]  |  refs path NAME
 #   subpowers slideshow OUT.webp IMG... [--width 880]    looping slider of your picks (plays in any README)
@@ -215,25 +220,30 @@ PY
 # minutes (400 s with three references, against 24 s with none). Painters work from about 1280 px
 # anyway, so each reference is shrunk once and cached by file and mtime.
 small_ref() {
-  local f="$1" key out
-  [[ -f "$f" ]] || { echo "$f"; return; }
-  mkdir -p "$CACHE_DIR/refs-small"
-  key="$(printf '%s|%s' "$f" "$(stat -f '%m-%z' "$f" 2>/dev/null || stat -c '%Y-%s' "$f")" | shasum | cut -c1-16)"
-  out="$CACHE_DIR/refs-small/$key.jpg"
-  if [[ ! -s "$out" ]]; then
-    python3 - "$f" "$out" <<'PY' 2>/dev/null || true
-import os, sys
+  local f="$1"
+  python3 - "$f" "$CACHE_DIR/refs-small" <<'PYTHON' 2>/dev/null || printf '%s\n' "$f"
+import hashlib, os, sys, tempfile
+from pathlib import Path
 from PIL import Image, ImageOps
-src, dst = sys.argv[1], sys.argv[2]
-tmp = f"{dst}.tmp.{os.getpid()}"
-im = ImageOps.exif_transpose(Image.open(src)).convert("RGB")
-if max(im.size) > 1280:
+src, cache = map(Path, sys.argv[1:])
+st = src.stat()
+key = hashlib.sha256(os.fsencode(src.resolve()) + f"|{st.st_mtime_ns}|{st.st_size}".encode()).hexdigest()
+folder = cache / key
+folder.mkdir(parents=True, exist_ok=True)
+dst = folder / (src.stem[:48] + ".jpg")
+if not dst.is_file() or not dst.stat().st_size:
+    with Image.open(src) as image:
+        im = ImageOps.exif_transpose(image).convert("RGB")
     im.thumbnail((1280, 1280))
-im.save(tmp, "JPEG", quality=88)
-os.replace(tmp, dst)
-PY
-  fi
-  if [[ -s "$out" ]]; then echo "$out"; else echo "$f"; fi
+    with tempfile.NamedTemporaryFile(dir=folder, delete=False) as tmp:
+        try:
+            im.save(tmp, "JPEG", quality=88)
+            tmp.flush()
+            os.replace(tmp.name, dst)
+        finally:
+            Path(tmp.name).unlink(missing_ok=True)
+print(dst)
+PYTHON
 }
 
 # --into PROJECT: paint straight into a HyperFrames project and mount the result as one layer (bin/hf-into).
@@ -296,7 +306,7 @@ case "$cmd" in
     [[ $# -ge 1 ]] || usage
     prompt="$1"; shift; out=""
     if [[ $# -gt 0 && "$1" != --* ]]; then out="$1"; shift; fi
-    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; painter_explicit=""; with_hf=""; has_soul=""; args=(); hf_args=(); has_size=""
+    painter="$(norm_painter "${SUBPOWERS_PAINTER:-auto}")"; painter_explicit=""; with_hf=""; has_soul=""; args=(); hf_args=(); has_size=""; context_source=auto; from_urls=(); no_url_images=""; ctx_files=()
     while [[ $# -gt 0 ]]; do
       if into_opt "$@"; then shift "$INTO_EAT"; continue; fi
       case "$1" in
@@ -306,6 +316,10 @@ case "$cmd" in
         --style-id|--model) [[ $# -ge 2 ]] || usage; hf_args+=("$1" "$2"); shift 2 ;;
         --cinematic) hf_args+=(--cinematic); shift ;;
         --size) [[ $# -ge 2 ]] || usage; has_size=1; args+=("$1" "$2"); shift 2 ;;
+        --from-url) [[ $# -ge 2 ]] || usage; from_urls+=("$2"); shift 2 ;;
+        --source) [[ $# -ge 2 ]] || usage; context_source="$2"; shift 2 ;;
+        --no-url-images) no_url_images=1; shift ;;
+        --context-file) [[ $# -ge 2 ]] || usage; ctx_files+=("$2"); shift 2 ;;
         --refs)
           [[ $# -ge 2 ]] || usage
           rf="$(ref_files "$2")" || exit 3
@@ -322,6 +336,27 @@ case "$cmd" in
 $MATCH_SET_TEXT"; shift 2 ;;
         *) args+=("$1"); shift ;;
       esac
+    done
+    for u in ${from_urls[@]+"${from_urls[@]}"}; do
+      uflags=(--json --source "$context_source"); [[ -n "$no_url_images" ]] && uflags+=(--no-images)
+      cjson="$(python3 "$here/context-ref" "$u" "${uflags[@]}")" || exit $?
+      cnote="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("prompt_context",""))' "$cjson")"
+      [[ -n "$cnote" ]] && prompt="$prompt
+
+$cnote"
+      if [[ -z "$no_url_images" ]]; then
+        while IFS= read -r imgp; do
+          [[ -n "$imgp" && -f "$imgp" ]] && args+=(--ref "$(small_ref "$imgp")")
+        done < <(python3 -c 'import json,sys
+for p in json.loads(sys.argv[1]).get("ref_images") or []: print(p)' "$cjson")
+      fi
+    done
+    for cf in ${ctx_files[@]+"${ctx_files[@]}"}; do
+      [[ -f "$cf" ]] || { say "--context-file not found: $cf"; exit 2; }
+      ctxt="$(python3 -c 'import sys; print(open(sys.argv[1], encoding="utf-8", errors="replace").read(1200).strip())' "$cf")"
+      [[ -n "$ctxt" ]] && prompt="$prompt
+
+Reference context: $ctxt"
     done
     # Only Higgsfield accepts --soul-id / --style-id / --model: auto-route when painter was not pinned,
     # or refuse cleanly if a non-Higgsfield painter (or council without Higgsfield) was requested.
@@ -675,6 +710,22 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --first|--last|--ref) [[ $# -ge 2 ]] || usage; has_src=1; vargs+=("$1" "$2"); shift 2 ;;
+        --from-url)
+          [[ $# -ge 2 ]] || usage
+          cjson="$(python3 "$here/context-ref" "$2" --json)" || exit $?
+          cnote="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1]).get("prompt_context",""))' "$cjson")"
+          [[ -n "$cnote" ]] && prompt="$prompt. $cnote"
+          while IFS= read -r imgp; do
+            [[ -n "$imgp" && -f "$imgp" ]] && { vargs+=(--ref "$imgp"); has_src=1; }
+          done < <(python3 -c 'import json,sys
+for p in (json.loads(sys.argv[1]).get("ref_images") or [])[:1]: print(p)' "$cjson")
+          shift 2 ;;
+        --context-file)
+          [[ $# -ge 2 ]] || usage
+          [[ -f "$2" ]] || { say "--context-file not found: $2"; exit 2; }
+          ctxt="$(python3 -c 'import sys; print(open(sys.argv[1], encoding="utf-8", errors="replace").read(1200).strip())' "$2")"
+          [[ -n "$ctxt" ]] && prompt="$prompt. Reference context: $ctxt"
+          shift 2 ;;
         --voice) [[ $# -ge 2 ]] || usage; has_src=1; grok_only+=(--voice "$2"); shift 2 ;;
         --model|--mode|--audio|--character|--location) [[ $# -ge 2 ]] || usage; hf_only+=("$1" "$2"); shift 2 ;;
         --no-audio) hf_only+=(--no-audio); shift ;;
@@ -720,13 +771,26 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     [[ $# -ge 1 ]] || usage
     out=""; if [[ "$1" != --* ]]; then out="$1"; shift; fi
     iprompt="Speaking naturally to camera in this room with authentic facial expressions and subtle body movement."
-    iargs=()
+    iargs=(); speak_text=""; speak_voice=""; has_audio=""
     while [[ $# -gt 0 ]]; do
       case "$1" in
         --prompt) [[ $# -ge 2 ]] || usage; iprompt="$2"; shift 2 ;;
+        --speak) [[ $# -ge 2 ]] || usage; speak_text="$2"; shift 2 ;;
+        --voice) [[ $# -ge 2 ]] || usage; speak_voice="$2"; shift 2 ;;
+        --audio) [[ $# -ge 2 ]] || usage; has_audio=1; iargs+=("$1" "$2"); shift 2 ;;
         *) iargs+=("$1"); shift ;;
       esac
     done
+    if [[ -n "$speak_text" ]]; then
+      if [[ -n "$has_audio" ]]; then say "pass either --audio or --speak for intone, not both"; exit 2; fi
+      vdest="${out:+${out%.*}.voice.wav}"
+      [[ -n "$vdest" ]] || vdest="${TMPDIR:-/tmp}/subpowers-intone-$$.wav"
+      vcmd=(python3 "$here/elevenlabs-voice" speak "$speak_text" "$vdest")
+      [[ -n "$speak_voice" ]] && vcmd+=(--voice "$speak_voice")
+      say "generating voice clip via ElevenLabs before Higgsfield Intone"
+      got_audio="$("${vcmd[@]}" | tail -n 1)" || exit $?
+      iargs+=(--audio "$got_audio")
+    fi
     if [[ -n "$out" ]]; then
       exec bash "$here/subpowers" video "$iprompt" "$out" --painter higgsfield --model intone ${iargs[@]+"${iargs[@]}"}
     else
@@ -734,6 +798,14 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
     fi
     ;;
   soul|soul-id) exec bash "$here/higgsfield-soul" "$@" ;;
+  voice|audio|sfx|music)
+    if [[ "$cmd" == sfx || "$cmd" == music ]]; then
+      exec python3 "$here/elevenlabs-voice" "$cmd" "$@"
+    else
+      exec python3 "$here/elevenlabs-voice" "$@"
+    fi ;;
+  context|from-url) exec python3 "$here/context-ref" "$@" ;;
+  carousel) exec python3 "$here/carousel" "$@" ;;
   think|plan) exec bash "$here/think" "$@" ;;
   hf|hyperframes) exec python3 "$here/hf-into" "$@" ;;
   slideshow|slider) exec python3 "$here/slideshow" "$@" ;;
@@ -741,14 +813,19 @@ for f in json.loads(sys.argv[1])["frames"]: print(" ".join(str(f).split()))' "$j
   canary) exec python3 "$here/canary" "$@" ;;
   doctor) exec bash "$here/doctor" "$@" ;;
   powers)
-    for p in $ORDER; do
-      if has "$p"; then printf 'image  %-12s ON\n' "$p"; else printf 'image  %-12s OFF  (subpowers doctor shows how to connect it)\n' "$p"; fi
+    echo "# Local CLI inventory (installation only; accounts not checked)"
+    for entry in chatgpt:codex antigravity:agy grok:grok; do
+      state=missing; command -v "${entry#*:}" >/dev/null && state=installed
+      printf 'image  %-12s %s\n' "${entry%:*}" "$state"
     done
-    for p in $OPTIN; do
-      if has "$p"; then printf 'image  %-12s ON   (opt-in: --painter %s, spends plan credits)\n' "$p" "$p"; else printf 'image  %-12s OFF  (opt-in; higgsfield auth login)\n' "$p"; fi
+    echo "# Paid / Creator Tools (opt-in, spend plan credits or paid quota)"
+    for cli in higgsfield elevenlabs; do
+      state=missing; command -v "$cli" >/dev/null && state=installed
+      printf 'paid   %-12s %s (opt-in; account not checked)\n' "$cli" "$state"
     done
-    if has grok; then printf 'video  %-12s ON   (Grok Imagine 1.5, The X Subscription)\n' "grok"; else printf 'video  %-12s OFF  (grok login)\n' "grok"; fi
-    if has higgsfield; then printf 'video  %-12s ON   (opt-in: --painter higgsfield, seedance_2_5 / kling4_0, spends credits)\n' "higgsfield"; else printf 'video  %-12s OFF  (opt-in; higgsfield auth login)\n' "higgsfield"; fi
+    if [[ -x "$here/context-ref" ]]; then
+      python3 "$here/context-ref" status 2>/dev/null || true
+    fi
     if [[ -x "$here/subpowers-mcp" ]]; then printf 'mcp    %-12s ON   (%s/subpowers-mcp)\n' "stdio" "$here"; fi
     ;;
   update)
