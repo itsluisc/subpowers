@@ -3,7 +3,7 @@
 
 subpowers remote SSH_HOST image PROMPT [--painter chatgpt|antigravity|grok]
 subpowers remote SSH_HOST status JOB_ID
-subpowers remote SSH_HOST fetch JOB_ID /absolute/local/output.png
+subpowers remote SSH_HOST fetch JOB_ID /absolute/local/output.png [--replace-substituted]
 
 No credentials are synced. No Mac media is mirrored. A systemd unit survives
 disconnect; status + fetch recover the same job without painting it again.
@@ -146,7 +146,10 @@ def main():
     image.add_argument('--painter', choices=['chatgpt','antigravity','grok'], default='chatgpt')
     for name in ('status','fetch'):
         p = sub.add_parser(name); p.add_argument('job_id')
-        if name == 'fetch': p.add_argument('out', type=Path)
+        if name == 'fetch':
+            p.add_argument('out', type=Path)
+            p.add_argument('--replace-substituted', action='store_true',
+                           help='replace an existing alternate filename when the delivered format differs')
     a = ap.parse_args()
     if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.@-]*', a.host):
         raise RuntimeError('host must be an SSH alias or user@host, never SSH options')
@@ -165,7 +168,9 @@ def main():
         raise RuntimeError('job not delivered: ' + status.get('state', 'unknown') + '; never resubmit an unknown outcome')
     remote = status['output']
     _name, ext = remote_image_path(remote, a.job_id)
-    out = fetch_destination(a.out.expanduser().absolute(), ext)
+    requested = a.out.expanduser().absolute()
+    out = fetch_destination(requested, ext)
+    no_clobber = out != requested and not a.replace_substituted
     out.parent.mkdir(parents=True, exist_ok=True)
     # Do not replace any existing local image until both transfers and checks succeed.
     with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
@@ -184,9 +189,17 @@ def main():
         status.update(local_output=str(out),local_sha256=digest,digest_match=True)
         meta = stage / 'metadata'
         meta.write_text(json.dumps(status,indent=2))
+        if no_clobber:
+            # The staged file is on the destination filesystem. Publish only if
+            # the name is still free, before replacing either receipt.
+            try:
+                os.link(image, out)
+            except FileExistsError as e:
+                raise RuntimeError(f'{out} already exists; use --replace-substituted to replace it') from e
         note.replace(out.with_suffix('.prompt.txt'))
         meta.replace(out.with_suffix('.remote.json'))
-        image.replace(out)
+        if not no_clobber:
+            image.replace(out)
     print(out)
 
 

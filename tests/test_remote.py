@@ -110,30 +110,64 @@ if __name__=='__main__': unittest.main()
 
 
 class OfflineFetch(unittest.TestCase):
-    def test_jpeg_fetch_and_failure_preserves_local_image(self):
+    def setUp(self):
+        import hashlib
         from unittest.mock import patch
-        from contextlib import redirect_stdout
-        import hashlib, io
+
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.dest = Path(tmp.name) / "result.png"
+        self.jpg = self.dest.with_suffix(".jpg")
+        self.raw = b"\xff\xd8\xff" + b"q" * 80
         job = "a" * 32
-        raw = b"\xff\xd8\xff" + b"q" * 80
-        status = dict(state="delivered", output=f"/home/test/.subpowers/jobs/{job}/image.jpg",
-                      sha256=hashlib.sha256(raw).hexdigest())
+        self.status = dict(state="delivered", output=f"/home/test/.subpowers/jobs/{job}/image.jpg",
+                           sha256=hashlib.sha256(self.raw).hexdigest())
+        self.args = ["remote", "stub", "fetch", job]
+        stub = patch.dict(MOD["main"].__globals__, ssh=lambda *args: dict(self.status))
+        stub.start()
+        self.addCleanup(stub.stop)
+
+    def fetch(self, path, *args, before_copy=None):
+        from contextlib import redirect_stdout
+        from unittest.mock import patch
+        import io
+
         def copy_stub(cmd, **kwargs):
-            Path(cmd[-1]).write_bytes(b"fixture receipt" if cmd[-2].endswith(".txt") else raw)
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "result.png"
-            main = MOD["main"]
-            with patch.dict(main.__globals__, ssh=lambda *args: dict(status)), \
-                 patch("sys.argv", ["remote","stub","fetch",job,str(dest)]), \
-                 patch("subprocess.run",side_effect=copy_stub), redirect_stdout(io.StringIO()):
-                main()
-                self.assertEqual(dest.with_suffix(".jpg").read_bytes(),raw)
-                self.assertFalse(dest.exists())
-                dest.with_suffix(".jpg").write_bytes(b"previous")
-                status["sha256"] = "0"*64
-                with self.assertRaises(RuntimeError):
-                    main()
-                self.assertEqual(dest.with_suffix(".jpg").read_bytes(), b"previous")
+            if before_copy:
+                before_copy()
+            Path(cmd[-1]).write_bytes(b"receipt" if cmd[-2].endswith(".txt") else self.raw)
+        with patch("sys.argv", [*self.args, str(path), *args]), \
+             patch("subprocess.run", side_effect=copy_stub), redirect_stdout(io.StringIO()):
+            MOD["main"]()
+
+    def test_free_substituted_name_accepts_verified_jpeg(self):
+        self.fetch(self.dest)
+        self.assertEqual(self.jpg.read_bytes(), self.raw)
+        self.assertFalse(self.dest.exists())
+
+    def test_substituted_collision_requires_approval(self):
+        self.jpg.write_bytes(b"previous")
+        receipt = self.jpg.with_suffix(".prompt.txt")
+        receipt.write_text("previous receipt")
+        with self.assertRaisesRegex(RuntimeError, "already exists"):
+            self.fetch(self.dest)
+        self.assertEqual(self.jpg.read_bytes(), b"previous")
+        self.assertEqual(receipt.read_text(), "previous receipt")
+        self.assertFalse(self.jpg.with_suffix(".remote.json").exists())
+        self.fetch(self.dest, "--replace-substituted")
+        self.assertEqual(self.jpg.read_bytes(), self.raw)
+
+    def test_substituted_name_created_during_copy_is_preserved(self):
+        with self.assertRaisesRegex(RuntimeError, "already exists"):
+            self.fetch(self.dest, before_copy=lambda: self.jpg.write_bytes(b"other writer"))
+        self.assertEqual(self.jpg.read_bytes(), b"other writer")
+
+    def test_bad_digest_preserves_named_image(self):
+        self.jpg.write_bytes(b"previous")
+        self.status["sha256"] = "0" * 64
+        with self.assertRaisesRegex(RuntimeError, "digest mismatch"):
+            self.fetch(self.jpg)
+        self.assertEqual(self.jpg.read_bytes(), b"previous")
 
     def test_status_rejects_receipt_link_leaving_job(self):
         with tempfile.TemporaryDirectory() as tmp:
