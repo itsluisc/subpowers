@@ -18,6 +18,7 @@ import shlex
 import subprocess
 import sys
 import uuid
+import tempfile
 
 RUNNER = '''import hashlib,json,os,pathlib,subprocess,sys
 p=pathlib.Path(sys.argv[1]); j=json.loads((p/'input.json').read_text()); out=p/'image.png'
@@ -77,6 +78,13 @@ print(json.dumps(dict(job_id=p.name,state='submitted',remote_dir=str(p))))
 
 STATUS = '''import json,pathlib,subprocess,sys,os
 p=pathlib.Path.home()/'.subpowers/jobs'/sys.argv[1]; j=json.loads((p/'status.json').read_text())
+if j['state'] == 'delivered':
+ img=pathlib.Path(j.get('output') or '')
+ receipt=img.with_suffix('.prompt.txt') if img.name else None
+ if (img.name not in {'image.png','image.jpeg','image.jpg','image.webp'}
+     or img.parent != p or img.resolve() != img or not img.is_file()
+     or receipt is None or receipt.resolve() != receipt or not receipt.is_file()):
+  j['state']='failed'; j.pop('output',None)
 if j['state'] in ('launching','running'):
  cmd=['systemctl']+([] if os.geteuid()==0 else ['--user'])+['is-active','subpowers-'+p.name]
  if subprocess.run(cmd,capture_output=True).returncode: j['state']='outcome_unknown'
@@ -159,20 +167,26 @@ def main():
     _name, ext = remote_image_path(remote, a.job_id)
     out = fetch_destination(a.out.expanduser().absolute(), ext)
     out.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(['scp','-q',a.host+':'+remote,str(out)],check=True,timeout=60)
-    data = out.read_bytes()
-    digest = hashlib.sha256(data).hexdigest()
-    if not image_bytes_match(data, ext):
-        raise RuntimeError('fetched output is not a %s; retained for inspection, not delivered' % ext)
-    if status.get('sha256') and digest != status['sha256']:
-        raise RuntimeError('fetched image does not match the remote delivery digest')
-    # Provenance stays beside the fetched image. Missing receipt is a delivery failure.
-    receipt = str(Path(remote).with_suffix('.prompt.txt'))
-    subprocess.run(['scp','-q',a.host+':'+receipt,str(out.with_suffix('.prompt.txt'))],check=True,timeout=30)
-    status['local_output'] = str(out)
-    status['local_sha256'] = digest
-    status['digest_match'] = digest == status.get('sha256') if status.get('sha256') else None
-    out.with_suffix('.remote.json').write_text(json.dumps(status,indent=2))
+    # Do not replace any existing local image until both transfers and checks succeed.
+    with tempfile.TemporaryDirectory(dir=out.parent) as tmp:
+        stage = Path(tmp)
+        image = stage / out.name
+        note = stage / 'receipt'
+        remote_note = str(Path(remote).with_suffix('.prompt.txt'))
+        subprocess.run(['scp','-q',a.host+':'+remote,str(image)],check=True,timeout=60)
+        data = image.read_bytes()
+        digest = hashlib.sha256(data).hexdigest()
+        if not image_bytes_match(data, ext) or digest != status.get('sha256'):
+            raise RuntimeError('fetched image format or digest mismatch')
+        subprocess.run(['scp','-q',a.host+':'+remote_note,str(note)],check=True,timeout=30)
+        if not note.is_file() or not note.stat().st_size:
+            raise RuntimeError('empty remote receipt')
+        status.update(local_output=str(out),local_sha256=digest,digest_match=True)
+        meta = stage / 'metadata'
+        meta.write_text(json.dumps(status,indent=2))
+        note.replace(out.with_suffix('.prompt.txt'))
+        meta.replace(out.with_suffix('.remote.json'))
+        image.replace(out)
     print(out)
 
 

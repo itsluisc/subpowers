@@ -107,3 +107,46 @@ class RemoteTests(unittest.TestCase):
 
 
 if __name__=='__main__': unittest.main()
+
+
+class OfflineFetch(unittest.TestCase):
+    def test_jpeg_fetch_and_failure_preserves_local_image(self):
+        from unittest.mock import patch
+        from contextlib import redirect_stdout
+        import hashlib, io
+        job = "a" * 32
+        raw = b"\xff\xd8\xff" + b"q" * 80
+        status = dict(state="delivered", output=f"/home/test/.subpowers/jobs/{job}/image.jpg",
+                      sha256=hashlib.sha256(raw).hexdigest())
+        def copy_stub(cmd, **kwargs):
+            Path(cmd[-1]).write_bytes(b"fixture receipt" if cmd[-2].endswith(".txt") else raw)
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "result.png"
+            main = MOD["main"]
+            with patch.dict(main.__globals__, ssh=lambda *args: dict(status)), \
+                 patch("sys.argv", ["remote","stub","fetch",job,str(dest)]), \
+                 patch("subprocess.run",side_effect=copy_stub), redirect_stdout(io.StringIO()):
+                main()
+                self.assertEqual(dest.with_suffix(".jpg").read_bytes(),raw)
+                self.assertFalse(dest.exists())
+                dest.with_suffix(".jpg").write_bytes(b"previous")
+                status["sha256"] = "0"*64
+                with self.assertRaises(RuntimeError):
+                    main()
+                self.assertEqual(dest.with_suffix(".jpg").read_bytes(), b"previous")
+
+    def test_status_rejects_receipt_link_leaving_job(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve()
+            job = "a" * 32
+            root = home/".subpowers/jobs"/job
+            root.mkdir(parents=True)
+            img = root/"image.jpg"
+            img.write_bytes(b"fixture")
+            other = home/"outside"
+            other.write_text("fixture")
+            (root/"image.prompt.txt").symlink_to(other)
+            (root/"status.json").write_text(json.dumps(dict(state="delivered",output=str(img))))
+            run = subprocess.run(["python3","-c",MOD["STATUS"],job],env=dict(os.environ,HOME=str(home)),
+                                 capture_output=True,text=True,check=True)
+            self.assertEqual(json.loads(run.stdout)["state"],"failed")
